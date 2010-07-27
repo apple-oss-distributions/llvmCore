@@ -180,8 +180,9 @@ template<class To, class From, class SimpleFrom> struct cast_convert_val {
 template<class To, class FromTy> struct cast_convert_val<To,FromTy,FromTy> {
   // This _is_ a simple type, just cast it.
   static typename cast_retty<To, FromTy>::ret_type doit(const FromTy &Val) {
-    return reinterpret_cast<typename cast_retty<To, FromTy>::ret_type>(
-                         const_cast<FromTy&>(Val));
+    typename cast_retty<To, FromTy>::ret_type Res2
+     = (typename cast_retty<To, FromTy>::ret_type)const_cast<FromTy&>(Val);
+    return Res2;
   }
 };
 
@@ -235,7 +236,7 @@ inline typename cast_retty<X, Y>::ret_type dyn_cast_or_null(const Y &Val) {
 
 
 #ifdef DEBUG_CAST_OPERATORS
-#include "llvm/Support/Streams.h"
+#include "llvm/Support/raw_ostream.h"
 
 struct bar {
   bar() {}
@@ -251,7 +252,7 @@ struct foo {
 };
 
 template <> inline bool isa_impl<foo,bar>(const bar &Val) {
-  cerr << "Classof: " << &Val << "\n";
+  dbgs() << "Classof: " << &Val << "\n";
   return true;
 }
 

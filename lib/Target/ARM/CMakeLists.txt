@@ -12,16 +12,30 @@ tablegen(ARMGenCallingConv.inc -gen-callingconv)
 tablegen(ARMGenSubtarget.inc -gen-subtarget)
 
 add_llvm_target(ARMCodeGen
+  ARMBaseInstrInfo.cpp
+  ARMBaseRegisterInfo.cpp
   ARMCodeEmitter.cpp
   ARMConstantIslandPass.cpp
   ARMConstantPoolValue.cpp
-  ARMInstrInfo.cpp
+  ARMExpandPseudoInsts.cpp
   ARMISelDAGToDAG.cpp
   ARMISelLowering.cpp
+  ARMInstrInfo.cpp
   ARMJITInfo.cpp
   ARMLoadStoreOptimizer.cpp
+  ARMMCAsmInfo.cpp
   ARMRegisterInfo.cpp
   ARMSubtarget.cpp
-  ARMTargetAsmInfo.cpp
   ARMTargetMachine.cpp
+  ARMTargetObjectFile.cpp
+  NEONMoveFix.cpp
+  NEONPreAllocPass.cpp
+  Thumb1InstrInfo.cpp
+  Thumb1RegisterInfo.cpp
+  Thumb2ITBlockPass.cpp
+  Thumb2InstrInfo.cpp
+  Thumb2RegisterInfo.cpp
+  Thumb2SizeReduction.cpp
   )
+
+target_link_libraries (LLVMARMCodeGen LLVMSelectionDAG)

@@ -12,7 +12,6 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/CodeGen/GCMetadataPrinter.h"
-
 using namespace llvm;
 
 GCMetadataPrinter::GCMetadataPrinter() { }
@@ -20,11 +19,11 @@ GCMetadataPrinter::GCMetadataPrinter() { }
 GCMetadataPrinter::~GCMetadataPrinter() { }
 
 void GCMetadataPrinter::beginAssembly(raw_ostream &OS, AsmPrinter &AP,
-                                      const TargetAsmInfo &TAI) {
+                                      const MCAsmInfo &MAI) {
   // Default is no action.
 }
 
 void GCMetadataPrinter::finishAssembly(raw_ostream &OS, AsmPrinter &AP,
-                                       const TargetAsmInfo &TAI) {
+                                       const MCAsmInfo &MAI) {
   // Default is no action.
 }

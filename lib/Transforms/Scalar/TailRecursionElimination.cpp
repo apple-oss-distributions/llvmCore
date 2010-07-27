@@ -25,7 +25,7 @@
 //     unlikely, that the return returns something else (like constant 0), and
 //     can still be TRE'd.  It can be TRE'd if ALL OTHER return instructions in
 //     the function return the exact same value.
-//  4. If it can prove that callees do not access theier caller stack frame,
+//  4. If it can prove that callees do not access their caller stack frame,
 //     they are marked as eligible for tail call elimination (by the code
 //     generator).
 //
@@ -52,21 +52,22 @@
 
 #define DEBUG_TYPE "tailcallelim"
 #include "llvm/Transforms/Scalar.h"
+#include "llvm/Transforms/Utils/Local.h"
 #include "llvm/Constants.h"
 #include "llvm/DerivedTypes.h"
 #include "llvm/Function.h"
 #include "llvm/Instructions.h"
 #include "llvm/Pass.h"
+#include "llvm/Analysis/CaptureTracking.h"
 #include "llvm/Support/CFG.h"
 #include "llvm/ADT/Statistic.h"
-#include "llvm/Support/Compiler.h"
 using namespace llvm;
 
 STATISTIC(NumEliminated, "Number of tail calls removed");
 STATISTIC(NumAccumAdded, "Number of accumulators introduced");
 
 namespace {
-  struct VISIBILITY_HIDDEN TailCallElim : public FunctionPass {
+  struct TailCallElim : public FunctionPass {
     static char ID; // Pass identification, replacement for typeid
     TailCallElim() : FunctionPass(&ID) {}
 
@@ -75,7 +76,7 @@ namespace {
   private:
     bool ProcessReturningBlock(ReturnInst *RI, BasicBlock *&OldEntry,
                                bool &TailCallsAreMarkedTail,
-                               std::vector<PHINode*> &ArgumentPHIs,
+                               SmallVector<PHINode*, 8> &ArgumentPHIs,
                                bool CannotTailCallElimCallsMarkedTail);
     bool CanMoveAboveCall(Instruction *I, CallInst *CI);
     Value *CanTransformAccumulatorRecursion(Instruction *I, CallInst *CI);
@@ -90,7 +91,6 @@ FunctionPass *llvm::createTailCallEliminationPass() {
   return new TailCallElim();
 }
 
-
 /// AllocaMightEscapeToCalls - Return true if this alloca may be accessed by
 /// callees of this function.  We only do very simple analysis right now, this
 /// could be expanded in the future to use mod/ref information for particular
@@ -100,7 +100,7 @@ static bool AllocaMightEscapeToCalls(AllocaInst *AI) {
   return true;
 }
 
-/// FunctionContainsAllocas - Scan the specified basic block for alloca
+/// CheckForEscapingAllocas - Scan the specified basic block for alloca
 /// instructions.  If it contains any that might be accessed by calls, return
 /// true.
 static bool CheckForEscapingAllocas(BasicBlock *BB,
@@ -127,7 +127,7 @@ bool TailCallElim::runOnFunction(Function &F) {
 
   BasicBlock *OldEntry = 0;
   bool TailCallsAreMarkedTail = false;
-  std::vector<PHINode*> ArgumentPHIs;
+  SmallVector<PHINode*, 8> ArgumentPHIs;
   bool MadeChange = false;
 
   bool FunctionContainsEscapingAllocas = false;
@@ -154,7 +154,6 @@ bool TailCallElim::runOnFunction(Function &F) {
   /// happen.  This bug is PR962.
   if (FunctionContainsEscapingAllocas)
     return false;
-  
 
   // Second pass, change any tail calls to loops.
   for (Function::iterator BB = F.begin(), E = F.end(); BB != E; ++BB)
@@ -201,8 +200,22 @@ bool TailCallElim::runOnFunction(Function &F) {
 bool TailCallElim::CanMoveAboveCall(Instruction *I, CallInst *CI) {
   // FIXME: We can move load/store/call/free instructions above the call if the
   // call does not mod/ref the memory location being processed.
-  if (I->mayWriteToMemory() || isa<LoadInst>(I))
+  if (I->mayHaveSideEffects())  // This also handles volatile loads.
     return false;
+  
+  if (LoadInst *L = dyn_cast<LoadInst>(I)) {
+    // Loads may always be moved above calls without side effects.
+    if (CI->mayHaveSideEffects()) {
+      // Non-volatile loads may be moved above a call with side effects if it
+      // does not write to memory and the load provably won't trap.
+      // FIXME: Writes to memory only matter if they may alias the pointer
+      // being loaded from.
+      if (CI->mayWriteToMemory() ||
+          !isSafeToLoadUnconditionally(L->getPointerOperand(), L,
+                                       L->getAlignment()))
+        return false;
+    }
+  }
 
   // Otherwise, if this is a side-effect free instruction, check to make sure
   // that it does not use the return value of the call.  If it doesn't use the
@@ -222,7 +235,7 @@ bool TailCallElim::CanMoveAboveCall(Instruction *I, CallInst *CI) {
 // We currently handle static constants and arguments that are not modified as
 // part of the recursion.
 //
-static bool isDynamicConstant(Value *V, CallInst *CI) {
+static bool isDynamicConstant(Value *V, CallInst *CI, ReturnInst *RI) {
   if (isa<Constant>(V)) return true; // Static constants are always dyn consts
 
   // Check to see if this is an immutable argument, if so, the value
@@ -240,6 +253,15 @@ static bool isDynamicConstant(Value *V, CallInst *CI) {
     if (CI->getOperand(ArgNo+1) == Arg)
       return true;
   }
+
+  // Switch cases are always constant integers. If the value is being switched
+  // on and the return is only reachable from one of its cases, it's
+  // effectively constant.
+  if (BasicBlock *UniquePred = RI->getParent()->getUniquePredecessor())
+    if (SwitchInst *SI = dyn_cast<SwitchInst>(UniquePred->getTerminator()))
+      if (SI->getCondition() == V)
+        return SI->getDefaultDest() != RI->getParent();
+
   // Not a constant or immutable argument, we can't safely transform.
   return false;
 }
@@ -252,10 +274,6 @@ static Value *getCommonReturnValue(ReturnInst *TheRI, CallInst *CI) {
   Function *F = TheRI->getParent()->getParent();
   Value *ReturnedValue = 0;
 
-  // TODO: Handle multiple value ret instructions;
-  if (isa<StructType>(F->getReturnType()))
-      return 0;
-
   for (Function::iterator BBI = F->begin(), E = F->end(); BBI != E; ++BBI)
     if (ReturnInst *RI = dyn_cast<ReturnInst>(BBI->getTerminator()))
       if (RI != TheRI) {
@@ -265,7 +283,7 @@ static Value *getCommonReturnValue(ReturnInst *TheRI, CallInst *CI) {
         // evaluatable at the start of the initial invocation of the function,
         // instead of at the end of the evaluation.
         //
-        if (!isDynamicConstant(RetOp, CI))
+        if (!isDynamicConstant(RetOp, CI, RI))
           return 0;
 
         if (ReturnedValue && RetOp != ReturnedValue)
@@ -302,7 +320,7 @@ Value *TailCallElim::CanTransformAccumulatorRecursion(Instruction *I,
 
 bool TailCallElim::ProcessReturningBlock(ReturnInst *Ret, BasicBlock *&OldEntry,
                                          bool &TailCallsAreMarkedTail,
-                                         std::vector<PHINode*> &ArgumentPHIs,
+                                         SmallVector<PHINode*, 8> &ArgumentPHIs,
                                        bool CannotTailCallElimCallsMarkedTail) {
   BasicBlock *BB = Ret->getParent();
   Function *F = BB->getParent();
@@ -380,7 +398,7 @@ bool TailCallElim::ProcessReturningBlock(ReturnInst *Ret, BasicBlock *&OldEntry,
   // create the new entry block, allowing us to branch back to the old entry.
   if (OldEntry == 0) {
     OldEntry = &F->getEntryBlock();
-    BasicBlock *NewEntry = BasicBlock::Create("", F, OldEntry);
+    BasicBlock *NewEntry = BasicBlock::Create(F->getContext(), "", F, OldEntry);
     NewEntry->takeName(OldEntry);
     OldEntry->setName("tailrecurse");
     BranchInst::Create(OldEntry, NewEntry);

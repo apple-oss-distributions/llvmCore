@@ -16,7 +16,6 @@
 
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallSet.h"
-#include "llvm/CodeGen/DebugLoc.h"
 #include "llvm/CodeGen/SelectionDAGNodes.h"
 
 namespace llvm {
@@ -92,20 +91,12 @@ public:
   ///
   bool SelectInstruction(Instruction *I);
 
-  /// SelectInstruction - Do "fast" instruction selection for the given
+  /// SelectOperator - Do "fast" instruction selection for the given
   /// LLVM IR operator (Instruction or ConstantExpr), and append
   /// generated machine instructions to the current block. Return true
   /// if selection was successful.
   ///
   bool SelectOperator(User *I, unsigned Opcode);
-
-  /// TargetSelectInstruction - This method is called by target-independent
-  /// code when the normal FastISel process fails to select an instruction.
-  /// This gives targets a chance to emit code for anything that doesn't
-  /// fit into FastISel's framework. It returns true if it was successful.
-  ///
-  virtual bool
-  TargetSelectInstruction(Instruction *I) = 0;
 
   /// getRegForValue - Create a virtual register and arrange for it to
   /// be assigned the value for the given LLVM value.
@@ -135,89 +126,97 @@ protected:
 #endif
            );
 
+  /// TargetSelectInstruction - This method is called by target-independent
+  /// code when the normal FastISel process fails to select an instruction.
+  /// This gives targets a chance to emit code for anything that doesn't
+  /// fit into FastISel's framework. It returns true if it was successful.
+  ///
+  virtual bool
+  TargetSelectInstruction(Instruction *I) = 0;
+
   /// FastEmit_r - This method is called by target-independent code
   /// to request that an instruction with the given type and opcode
   /// be emitted.
-  virtual unsigned FastEmit_(MVT::SimpleValueType VT,
-                             MVT::SimpleValueType RetVT,
-                             ISD::NodeType Opcode);
+  virtual unsigned FastEmit_(MVT VT,
+                             MVT RetVT,
+                             unsigned Opcode);
 
   /// FastEmit_r - This method is called by target-independent code
   /// to request that an instruction with the given type, opcode, and
   /// register operand be emitted.
   ///
-  virtual unsigned FastEmit_r(MVT::SimpleValueType VT,
-                              MVT::SimpleValueType RetVT,
-                              ISD::NodeType Opcode, unsigned Op0);
+  virtual unsigned FastEmit_r(MVT VT,
+                              MVT RetVT,
+                              unsigned Opcode, unsigned Op0);
 
   /// FastEmit_rr - This method is called by target-independent code
   /// to request that an instruction with the given type, opcode, and
   /// register operands be emitted.
   ///
-  virtual unsigned FastEmit_rr(MVT::SimpleValueType VT,
-                               MVT::SimpleValueType RetVT,
-                               ISD::NodeType Opcode,
+  virtual unsigned FastEmit_rr(MVT VT,
+                               MVT RetVT,
+                               unsigned Opcode,
                                unsigned Op0, unsigned Op1);
 
   /// FastEmit_ri - This method is called by target-independent code
   /// to request that an instruction with the given type, opcode, and
   /// register and immediate operands be emitted.
   ///
-  virtual unsigned FastEmit_ri(MVT::SimpleValueType VT,
-                               MVT::SimpleValueType RetVT,
-                               ISD::NodeType Opcode,
+  virtual unsigned FastEmit_ri(MVT VT,
+                               MVT RetVT,
+                               unsigned Opcode,
                                unsigned Op0, uint64_t Imm);
 
   /// FastEmit_rf - This method is called by target-independent code
   /// to request that an instruction with the given type, opcode, and
   /// register and floating-point immediate operands be emitted.
   ///
-  virtual unsigned FastEmit_rf(MVT::SimpleValueType VT,
-                               MVT::SimpleValueType RetVT,
-                               ISD::NodeType Opcode,
+  virtual unsigned FastEmit_rf(MVT VT,
+                               MVT RetVT,
+                               unsigned Opcode,
                                unsigned Op0, ConstantFP *FPImm);
 
   /// FastEmit_rri - This method is called by target-independent code
   /// to request that an instruction with the given type, opcode, and
   /// register and immediate operands be emitted.
   ///
-  virtual unsigned FastEmit_rri(MVT::SimpleValueType VT,
-                                MVT::SimpleValueType RetVT,
-                                ISD::NodeType Opcode,
+  virtual unsigned FastEmit_rri(MVT VT,
+                                MVT RetVT,
+                                unsigned Opcode,
                                 unsigned Op0, unsigned Op1, uint64_t Imm);
 
   /// FastEmit_ri_ - This method is a wrapper of FastEmit_ri. It first tries
   /// to emit an instruction with an immediate operand using FastEmit_ri.
   /// If that fails, it materializes the immediate into a register and try
   /// FastEmit_rr instead.
-  unsigned FastEmit_ri_(MVT::SimpleValueType VT,
-                        ISD::NodeType Opcode,
+  unsigned FastEmit_ri_(MVT VT,
+                        unsigned Opcode,
                         unsigned Op0, uint64_t Imm,
-                        MVT::SimpleValueType ImmType);
+                        MVT ImmType);
   
   /// FastEmit_rf_ - This method is a wrapper of FastEmit_rf. It first tries
   /// to emit an instruction with an immediate operand using FastEmit_rf.
   /// If that fails, it materializes the immediate into a register and try
   /// FastEmit_rr instead.
-  unsigned FastEmit_rf_(MVT::SimpleValueType VT,
-                        ISD::NodeType Opcode,
+  unsigned FastEmit_rf_(MVT VT,
+                        unsigned Opcode,
                         unsigned Op0, ConstantFP *FPImm,
-                        MVT::SimpleValueType ImmType);
+                        MVT ImmType);
   
   /// FastEmit_i - This method is called by target-independent code
   /// to request that an instruction with the given type, opcode, and
   /// immediate operand be emitted.
-  virtual unsigned FastEmit_i(MVT::SimpleValueType VT,
-                              MVT::SimpleValueType RetVT,
-                              ISD::NodeType Opcode,
+  virtual unsigned FastEmit_i(MVT VT,
+                              MVT RetVT,
+                              unsigned Opcode,
                               uint64_t Imm);
 
   /// FastEmit_f - This method is called by target-independent code
   /// to request that an instruction with the given type, opcode, and
   /// floating-point immediate operand be emitted.
-  virtual unsigned FastEmit_f(MVT::SimpleValueType VT,
-                              MVT::SimpleValueType RetVT,
-                              ISD::NodeType Opcode,
+  virtual unsigned FastEmit_f(MVT VT,
+                              MVT RetVT,
+                              unsigned Opcode,
                               ConstantFP *FPImm);
 
   /// FastEmitInst_ - Emit a MachineInstr with no operands and a
@@ -269,12 +268,12 @@ protected:
 
   /// FastEmitInst_extractsubreg - Emit a MachineInstr for an extract_subreg
   /// from a specified index of a superregister to a specified type.
-  unsigned FastEmitInst_extractsubreg(MVT::SimpleValueType RetVT,
+  unsigned FastEmitInst_extractsubreg(MVT RetVT,
                                       unsigned Op0, uint32_t Idx);
 
   /// FastEmitZExtFromI1 - Emit MachineInstrs to compute the value of Op
   /// with all but the least significant bit set to zero.
-  unsigned FastEmitZExtFromI1(MVT::SimpleValueType VT,
+  unsigned FastEmitZExtFromI1(MVT VT,
                               unsigned Op);
 
   /// FastEmitBranch - Emit an unconditional branch to the given block,
@@ -299,7 +298,9 @@ protected:
   }
 
 private:
-  bool SelectBinaryOp(User *I, ISD::NodeType ISDOpcode);
+  bool SelectBinaryOp(User *I, unsigned ISDOpcode);
+
+  bool SelectFNeg(User *I);
 
   bool SelectGetElementPtr(User *I);
 
@@ -307,7 +308,7 @@ private:
 
   bool SelectBitCast(User *I);
   
-  bool SelectCast(User *I, ISD::NodeType Opcode);
+  bool SelectCast(User *I, unsigned Opcode);
 };
 
 }

@@ -15,7 +15,6 @@
 #ifndef LLVM_APINT_H
 #define LLVM_APINT_H
 
-#include "llvm/Support/DataTypes.h"
 #include "llvm/Support/MathExtras.h"
 #include <cassert>
 #include <climits>
@@ -27,12 +26,13 @@ namespace llvm {
   class Deserializer;
   class FoldingSetNodeID;
   class raw_ostream;
+  class StringRef;
 
   template<typename T>
   class SmallVectorImpl;
 
-  /* An unsigned host type used as a single part of a multi-part
-     bignum.  */
+  // An unsigned host type used as a single part of a multi-part
+  // bignum.
   typedef uint64_t integerPart;
 
   const unsigned int host_char_bit = 8;
@@ -150,10 +150,19 @@ class APInt {
     return isSingleWord() ? VAL : pVal[whichWord(bitPosition)];
   }
 
+  /// Converts a string into a number.  The string must be non-empty
+  /// and well-formed as a number of the given base. The bit-width
+  /// must be sufficient to hold the result.
+  ///
   /// This is used by the constructors that take string arguments.
+  ///
+  /// StringRef::getAsInteger is superficially similar but (1) does
+  /// not assume that the string is well-formed and (2) grows the
+  /// result to hold the input.
+  ///
+  /// @param radix 2, 8, 10, or 16
   /// @brief Convert a char array into an APInt
-  void fromString(unsigned numBits, const char *strStart, unsigned slen,
-                  uint8_t radix);
+  void fromString(unsigned numBits, const StringRef &str, uint8_t radix);
 
   /// This is used by the toString method to divide by the radix. It simply
   /// provides a more convenient form of divide for internal use since KnuthDiv
@@ -229,17 +238,17 @@ public:
   /// @brief Construct an APInt of numBits width, initialized as bigVal[].
   APInt(unsigned numBits, unsigned numWords, const uint64_t bigVal[]);
 
-  /// This constructor interprets the slen characters starting at StrStart as
-  /// a string in the given radix. The interpretation stops when the first
-  /// character that is not suitable for the radix is encountered. Acceptable
-  /// radix values are 2, 8, 10 and 16. It is an error for the value implied by
-  /// the string to require more bits than numBits.
+  /// This constructor interprets the string \arg str in the given radix. The
+  /// interpretation stops when the first character that is not suitable for the
+  /// radix is encountered, or the end of the string. Acceptable radix values
+  /// are 2, 8, 10 and 16. It is an error for the value implied by the string to
+  /// require more bits than numBits.
+  ///
   /// @param numBits the bit width of the constructed APInt
-  /// @param strStart the start of the string to be interpreted
-  /// @param slen the maximum number of characters to interpret
-  /// @param radix the radix to use for the conversion
+  /// @param str the string to be interpreted
+  /// @param radix the radix to use for the conversion 
   /// @brief Construct an APInt from a string representation.
-  APInt(unsigned numBits, const char strStart[], unsigned slen, uint8_t radix);
+  APInt(unsigned numBits, const StringRef &str, uint8_t radix);
 
   /// Simply makes *this a copy of that.
   /// @brief Copy Constructor.
@@ -571,6 +580,21 @@ public:
   /// @returns *this after ORing with RHS.
   /// @brief Bitwise OR assignment operator.
   APInt& operator|=(const APInt& RHS);
+
+  /// Performs a bitwise OR operation on this APInt and RHS. RHS is
+  /// logically zero-extended or truncated to match the bit-width of
+  /// the LHS.
+  /// 
+  /// @brief Bitwise OR assignment operator.
+  APInt& operator|=(uint64_t RHS) {
+    if (isSingleWord()) {
+      VAL |= RHS;
+      clearUnusedBits();
+    } else {
+      pVal[0] |= RHS;
+    }
+    return *this;
+  }
 
   /// Performs a bitwise XOR operation on this APInt and RHS. The result is
   /// assigned to *this.
@@ -1063,9 +1087,9 @@ public:
   }
 
   /// This method determines how many bits are required to hold the APInt
-  /// equivalent of the string given by \p str of length \p slen.
+  /// equivalent of the string given by \arg str.
   /// @brief Get bits required for string value.
-  static unsigned getBitsNeeded(const char* str, unsigned slen, uint8_t radix);
+  static unsigned getBitsNeeded(const StringRef& str, uint8_t radix);
 
   /// countLeadingZeros - This function is an APInt version of the
   /// countLeadingZeros_{32,64} functions in MathExtras.h. It counts the number
@@ -1235,6 +1259,11 @@ public:
     return BitWidth - 1 - countLeadingZeros();
   }
 
+  /// @returns the ceil log base 2 of this APInt.
+  unsigned ceilLogBase2() const {
+    return BitWidth - (*this - 1).countLeadingZeros();
+  }
+
   /// @returns the log base 2 of this APInt if its an exact power of two, -1
   /// otherwise
   int32_t exactLogBase2() const {
@@ -1256,6 +1285,18 @@ public:
 
   /// @returns the multiplicative inverse for a given modulo.
   APInt multiplicativeInverse(const APInt& modulo) const;
+
+  /// @}
+  /// @name Support for division by constant
+  /// @{
+
+  /// Calculate the magic number for signed division by a constant.
+  struct ms;
+  ms magic() const;
+
+  /// Calculate the magic number for unsigned division by a constant.
+  struct mu;
+  mu magicu() const;
 
   /// @}
   /// @name Building-block Operations for APInt and APFloat
@@ -1291,6 +1332,9 @@ public:
 
   /// Set the given bit of a bignum.  Zero-based.
   static void tcSetBit(integerPart *, unsigned int bit);
+
+  /// Clear the given bit of a bignum.  Zero-based.
+  static void tcClearBit(integerPart *, unsigned int bit);
 
   /// Returns the bit number of the least or most significant set bit
   /// of a number.  If the input number has no bits set -1U is
@@ -1386,6 +1430,19 @@ public:
   void dump() const;
 
   /// @}
+};
+
+/// Magic data for optimising signed division by a constant.
+struct APInt::ms {
+  APInt m;  ///< magic number
+  unsigned s;  ///< shift amount
+};
+
+/// Magic data for optimising unsigned division by a constant.
+struct APInt::mu {
+  APInt m;     ///< magic number
+  bool a;      ///< add indicator
+  unsigned s;  ///< shift amount
 };
 
 inline bool operator==(uint64_t V1, const APInt& V2) {

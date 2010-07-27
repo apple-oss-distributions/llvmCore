@@ -42,11 +42,15 @@ LLVM_ASSERTIONS="$7"
 # build.
 LLVM_OPTIMIZED="$8"
 
+# The ninth parameter is a yes/no that indicates whether libLTO.dylib
+# should be installed.
+INSTALL_LIBLTO="$9"
+
 # The nineth parameter is the version number of the submission, e.g. 1007.
-LLVM_SUBMIT_VERSION="$9"
+LLVM_SUBMIT_VERSION="${10}"
 
 # The tenth parameter is the subversion number of the submission, e.g. 03.
-LLVM_SUBMIT_SUBVERSION="${10}"
+LLVM_SUBMIT_SUBVERSION="${11}"
 
 # The current working directory is where the build will happen. It may already
 # contain a partial result of an interrupted build, in which case this script
@@ -56,15 +60,20 @@ DIR=`pwd`
 DARWIN_VERS=`uname -r | sed 's/\..*//'`
 echo DARWIN_VERS = $DARWIN_VERS
 
-# If the user has CC set in their environment unset it now
-unset CC
-
-DT_HOME=$DEST_DIR/Developer/usr
-DEST_ROOT="/Developer$DEST_ROOT"
-if [ "x$DEVELOPER_BIN" != "x" ]; then
-    DT_HOME=$DEST_DIR/$DEVELOPER_DIR/usr
-    DEST_ROOT="/$DEVELOPER_DIR$DEST_ROOT"
+if [ "x$RC_ProjectName" = "xllvmCore_Embedded" ]; then
+    DEST_DIR="$DEST_DIR/Developer/Platforms/iPhoneOS.platform"
+    mkdir -p "$DEST_DIR"
 fi
+
+DEVELOPER_DIR="${DEVELOPER_DIR-Developer}"
+if [ "x$RC_ProjectName" = "xllvmCore_EmbeddedHosted" ]; then
+    DT_HOME="$DEST_DIR/usr"
+    HOST_SDKROOT=$SDKROOT
+else
+    DT_HOME="$DEST_DIR/$DEVELOPER_DIR/usr"
+fi
+
+DEST_ROOT="/$DEVELOPER_DIR$DEST_ROOT"
 
 ################################################################################
 # Run the build.
@@ -76,17 +85,77 @@ SRC_DIR=$DIR/src
 rm -rf $SRC_DIR || exit 1
 mkdir $SRC_DIR || exit 1
 ln -s $ORIG_SRC_DIR/* $SRC_DIR/ || exit 1
+# We can't use the top-level Makefile as-is.  Remove the soft link:
+rm $SRC_DIR/Makefile || exit 1
+# Now create our own by editing the top-level Makefile, deleting every line marked "Apple-style":
+sed -e '/[Aa]pple-style/d' -e '/include.*GNUmakefile/d' $ORIG_SRC_DIR/Makefile > $SRC_DIR/Makefile || exit 1
 
 # Build the LLVM tree universal.
 mkdir -p $DIR/obj-llvm || exit 1
 cd $DIR/obj-llvm || exit 1
 
-if [ \! -f Makefile.config ]; then
-    $SRC_DIR/configure --prefix=$DT_HOME/local \
-        --enable-targets=arm,x86,powerpc,cbe \
-        --enable-assertions=$LLVM_ASSERTIONS \
-        --enable-optimized=$LLVM_OPTIMIZED \
-        || exit 1
+
+if [ "x$RC_ProjectName" = "xllvmCore_EmbeddedHosted" ]; then
+  # The cross-tools' build process expects to find an existing cross toolchain
+  # under names like 'arm-apple-darwin$DARWIN_VERS-as'; so make them.
+  rm -rf $DIR/bin || exit 1
+  mkdir $DIR/bin || exit 1
+  for prog in ar nm ranlib strip lipo ld as ; do
+    P=$DIR/bin/arm-apple-darwin$DARWIN_VERS-${prog}
+    T=`xcrun -sdk $SDKROOT -find ${prog}`
+    echo '#!/bin/sh' > $P || exit 1
+    echo 'exec '$T' "$@"' >> $P || exit 1
+    chmod a+x $P || exit 1
+  done
+  # Try to use the platform llvm-gcc. Fall back to gcc if it's not available.
+  for prog in gcc g++ ; do
+    P=$DIR/bin/arm-apple-darwin$DARWIN_VERS-${prog}
+    T=`xcrun -find llvm-${prog}`
+    if [ "x$T" = "x" ] ; then
+      T=`xcrun -sdk $SDKROOT -find ${prog}`
+    fi
+    echo '#!/bin/sh' > $P || exit 1
+    echo 'exec '$T' -arch armv6 -isysroot '${SDKROOT}' "$@"' >> $P || exit 1
+    chmod a+x $P || exit 1
+  done
+
+  PATH=$DIR/bin:$PATH
+# otherwise, try to use llvm-gcc if it's available
+elif [ $DARWIN_VERS -gt 9 ]; then
+  # If the user has set CC or CXX, respect their wishes.  If not,
+  # compile with LLVM-GCC/LLVM-G++ if available; if LLVM is not
+  # available, fall back to usual GCC/G++ default.
+  savedPATH=$PATH ; PATH="/Developer/usr/bin:$PATH"
+  XTMPCC=$(which llvm-gcc)
+  if [ x$CC  = x -a x$XTMPCC != x ] ; then export CC=$XTMPCC  ; fi
+  XTMPCC=$(which llvm-g++)
+  if [ x$CXX = x -a x$XTMPCC != x ] ; then export CXX=$XTMPCC ; fi
+  PATH=$savedPATH
+  unset XTMPCC savedPATH
+fi
+
+
+if [ "x$RC_ProjectName" = "xllvmCore_EmbeddedHosted" ]; then
+  if [ \! -f Makefile.config ]; then
+      $SRC_DIR/configure --prefix=$DT_HOME \
+          --enable-targets=arm \
+          --host=arm-apple-darwin10 \
+          --target=arm-apple-darwin10 \
+          --build=i686-apple-darwin10 \
+          --enable-assertions=$LLVM_ASSERTIONS \
+          --enable-optimized=$LLVM_OPTIMIZED \
+          --disable-bindings \
+          || exit 1
+  fi
+else
+  if [ \! -f Makefile.config ]; then
+      $SRC_DIR/configure --prefix=$DT_HOME/local \
+          --enable-targets=arm,x86,powerpc,cbe \
+          --enable-assertions=$LLVM_ASSERTIONS \
+          --enable-optimized=$LLVM_OPTIMIZED \
+          --disable-bindings \
+          || exit 1
+  fi
 fi
 
 SUBVERSION=`echo $RC_ProjectSourceVersion | sed -e 's/[^.]*\.\([0-9]*\).*/\1/'`
@@ -136,12 +205,16 @@ if [ "x$MAJ_VER" != "x4" -o "x$MIN_VER" != "x0" ]; then
 fi
 
 make $JOBS_FLAG $OPTIMIZE_OPTS UNIVERSAL=1 UNIVERSAL_ARCH="$TARGETS" \
+    UNIVERSAL_SDK_PATH=$HOST_SDKROOT \
+    NO_RUNTIME_LIBS=1 \
+    REQUIRES_RTTI=1 \
+    DISABLE_EDIS=1 \
     LLVM_SUBMIT_VERSION=$LLVM_SUBMIT_VERSION \
     LLVM_SUBMIT_SUBVERSION=$LLVM_SUBMIT_SUBVERSION \
     CXXFLAGS="-DLLVM_VERSION_INFO='\" Apple Build #$LLVM_VERSION\"'" \
     VERBOSE=1
 
-if ! test $? == 0 ; then
+if [ $? != 0 ] ; then
     echo "error: LLVM 'make' failed!"
     exit 1
 fi 
@@ -159,6 +232,8 @@ cd $DIR/obj-llvm || exit 1
 
 # Install the tree into the destination directory.
 make $LOCAL_MAKEFLAGS $OPTIMIZE_OPTS UNIVERSAL=1 UNIVERSAL_ARCH="$TARGETS" \
+    NO_RUNTIME_LIBS=1 \
+    DISABLE_EDIS=1 \
     LLVM_SUBMIT_VERSION=$LLVM_SUBMIT_VERSION \
     LLVM_SUBMIT_SUBVERSION=$LLVM_SUBMIT_SUBVERSION \
     OPTIMIZE_OPTION='-O3' VERBOSE=1 install
@@ -169,7 +244,11 @@ if ! test $? == 0 ; then
 fi 
 
 # Install Version.h
-RC_ProjectSourceSubversion=`printf "%d" $LLVM_SUBMIT_SUBVERSION`
+LLVM_MINOR_VERSION=`echo $LLVM_SUBMIT_SUBVERSION | sed -e 's,0*\([1-9][0-9]*\),\1,'`
+if [ "x$LLVM_MINOR_VERSION" = "x" ]; then
+    LLVM_MINOR_VERSION=0
+fi
+RC_ProjectSourceSubversion=`printf "%d" $LLVM_MINOR_VERSION`
 echo "#define LLVM_VERSION ${RC_ProjectSourceVersion}" > $DEST_DIR$DEST_ROOT/include/llvm/Version.h
 echo "#define LLVM_MINOR_VERSION ${RC_ProjectSourceSubversion}" >> $DEST_DIR$DEST_ROOT/include/llvm/Version.h
 
@@ -202,9 +281,15 @@ else
 fi
 
 cd $DEST_DIR$DEST_ROOT
-mkdir -p $DT_HOME/lib
-mv lib/libLTO.dylib $DT_HOME/lib/libLTO.dylib
-strip -S $DT_HOME/lib/libLTO.dylib
+if [ "$INSTALL_LIBLTO" = "yes" ]; then
+    mkdir -p $DT_HOME/lib
+    mv lib/libLTO.dylib $DT_HOME/lib/libLTO.dylib
+
+    # Use '-l' to strip i386 modules. N.B. that flag doesn't work with kext or
+    # PPC objects!
+    strip -arch all -Sl $DT_HOME/lib/libLTO.dylib
+fi
+
 rm -f lib/libLTO.a lib/libLTO.la
 
 # The Hello dylib is an example of how to build a pass. No need to install it.
@@ -265,6 +350,15 @@ chgrp -R wheel $DEST_DIR
 # Remove tar ball from docs directory
 
 find $DEST_DIR -name html.tar.gz -exec rm {} \;
+
+################################################################################
+# symlinks so that B&I can find things
+
+if [ "$INSTALL_LIBLTO" = "yes" ]; then
+  mkdir -p $DEST_DIR/usr/lib/
+  cd $DEST_DIR/usr/lib && \
+    ln -s ../../$DEVELOPER_DIR/usr/lib/libLTO.dylib ./libLTO.dylib
+fi
 
 ################################################################################
 # w00t! Done!

@@ -35,7 +35,9 @@
 #include "llvm/Target/TargetOptions.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
+#include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/MathExtras.h"
+#include "llvm/Support/raw_ostream.h"
 #include "llvm/ADT/BitVector.h"
 #include "llvm/ADT/STLExtras.h"
 #include <cstdlib>
@@ -176,8 +178,7 @@ unsigned SPURegisterInfo::getRegisterNumbering(unsigned RegEnum) {
   case SPU::R126: return 126;
   case SPU::R127: return 127;
   default:
-    cerr << "Unhandled reg in SPURegisterInfo::getRegisterNumbering!\n";
-    abort();
+    llvm_report_error("Unhandled reg in SPURegisterInfo::getRegisterNumbering");
   }
 }
 
@@ -218,8 +219,8 @@ SPURegisterInfo::getNumArgRegs()
 
 /// getPointerRegClass - Return the register class to use to hold pointers.
 /// This is used for addressing modes.
-const TargetRegisterClass * SPURegisterInfo::getPointerRegClass() const
-{
+const TargetRegisterClass *
+SPURegisterInfo::getPointerRegClass(unsigned Kind) const {
   return &SPU::R32CRegClass;
 }
 
@@ -325,8 +326,9 @@ SPURegisterInfo::eliminateCallFramePseudoInstr(MachineFunction &MF,
   MBB.erase(I);
 }
 
-void
+unsigned
 SPURegisterInfo::eliminateFrameIndex(MachineBasicBlock::iterator II, int SPAdj,
+                                     FrameIndexValue *Value,
                                      RegScavenger *RS) const
 {
   unsigned i = 0;
@@ -364,12 +366,13 @@ SPURegisterInfo::eliminateFrameIndex(MachineBasicBlock::iterator II, int SPAdj,
   SPOp.ChangeToRegister(SPU::R1, false);
   if (Offset > SPUFrameInfo::maxFrameOffset()
       || Offset < SPUFrameInfo::minFrameOffset()) {
-    cerr << "Large stack adjustment ("
+    errs() << "Large stack adjustment ("
          << Offset
          << ") in SPURegisterInfo::eliminateFrameIndex.";
   } else {
     MO.ChangeToImmediate(Offset);
   }
+  return 0;
 }
 
 /// determineFrameLayout - Determine the size of the frame and maximum call
@@ -433,7 +436,7 @@ void SPURegisterInfo::emitPrologue(MachineFunction &MF) const
 
   // Prepare for debug frame info.
   bool hasDebugInfo = MMI && MMI->hasDebugInfo();
-  unsigned FrameLabelId = 0;
+  MCSymbol *FrameLabel = 0;
 
   // Move MBBI back to the beginning of the function.
   MBBI = MBB.begin();
@@ -449,8 +452,8 @@ void SPURegisterInfo::emitPrologue(MachineFunction &MF) const
     FrameSize = -(FrameSize + SPUFrameInfo::minStackSize());
     if (hasDebugInfo) {
       // Mark effective beginning of when frame pointer becomes valid.
-      FrameLabelId = MMI->NextLabelID();
-      BuildMI(MBB, MBBI, dl, TII.get(SPU::DBG_LABEL)).addImm(FrameLabelId);
+      FrameLabel = MMI->getContext().CreateTempSymbol();
+      BuildMI(MBB, MBBI, dl, TII.get(SPU::DBG_LABEL)).addSym(FrameLabel);
     }
 
     // Adjust stack pointer, spilling $lr -> 16($sp) and $sp -> -FrameSize($sp)
@@ -485,8 +488,10 @@ void SPURegisterInfo::emitPrologue(MachineFunction &MF) const
         .addReg(SPU::R2)
         .addReg(SPU::R1);
     } else {
-      cerr << "Unhandled frame size: " << FrameSize << "\n";
-      abort();
+      std::string msg;
+      raw_string_ostream Msg(msg);
+      Msg << "Unhandled frame size: " << FrameSize;
+      llvm_report_error(Msg.str());
     }
 
     if (hasDebugInfo) {
@@ -495,7 +500,7 @@ void SPURegisterInfo::emitPrologue(MachineFunction &MF) const
       // Show update of SP.
       MachineLocation SPDst(MachineLocation::VirtualFP);
       MachineLocation SPSrc(MachineLocation::VirtualFP, -FrameSize);
-      Moves.push_back(MachineMove(FrameLabelId, SPDst, SPSrc));
+      Moves.push_back(MachineMove(FrameLabel, SPDst, SPSrc));
 
       // Add callee saved registers to move list.
       const std::vector<CalleeSavedInfo> &CSI = MFI->getCalleeSavedInfo();
@@ -505,16 +510,16 @@ void SPURegisterInfo::emitPrologue(MachineFunction &MF) const
         if (Reg == SPU::R0) continue;
         MachineLocation CSDst(MachineLocation::VirtualFP, Offset);
         MachineLocation CSSrc(Reg);
-        Moves.push_back(MachineMove(FrameLabelId, CSDst, CSSrc));
+        Moves.push_back(MachineMove(FrameLabel, CSDst, CSSrc));
       }
 
       // Mark effective beginning of when frame pointer is ready.
-      unsigned ReadyLabelId = MMI->NextLabelID();
-      BuildMI(MBB, MBBI, dl, TII.get(SPU::DBG_LABEL)).addImm(ReadyLabelId);
+      MCSymbol *ReadyLabel = MMI->getContext().CreateTempSymbol();
+      BuildMI(MBB, MBBI, dl, TII.get(SPU::DBG_LABEL)).addSym(ReadyLabel);
 
       MachineLocation FPDst(SPU::R1);
       MachineLocation FPSrc(MachineLocation::VirtualFP);
-      Moves.push_back(MachineMove(ReadyLabelId, FPDst, FPSrc));
+      Moves.push_back(MachineMove(ReadyLabel, FPDst, FPSrc));
     }
   } else {
     // This is a leaf function -- insert a branch hint iff there are
@@ -525,8 +530,8 @@ void SPURegisterInfo::emitPrologue(MachineFunction &MF) const
       dl = MBBI->getDebugLoc();
 
       // Insert terminator label
-      unsigned BranchLabelId = MMI->NextLabelID();
-      BuildMI(MBB, MBBI, dl, TII.get(SPU::DBG_LABEL)).addImm(BranchLabelId);
+      BuildMI(MBB, MBBI, dl, TII.get(SPU::DBG_LABEL))
+        .addSym(MMI->getContext().CreateTempSymbol());
     }
   }
 }
@@ -577,8 +582,10 @@ SPURegisterInfo::emitEpilogue(MachineFunction &MF, MachineBasicBlock &MBB) const
         .addReg(SPU::R2)
         .addReg(SPU::R1);
     } else {
-      cerr << "Unhandled frame size: " << FrameSize << "\n";
-      abort();
+      std::string msg;
+      raw_string_ostream Msg(msg);
+      Msg << "Unhandled frame size: " << FrameSize;
+      llvm_report_error(Msg.str());
     }
    }
 }
@@ -590,7 +597,7 @@ SPURegisterInfo::getRARegister() const
 }
 
 unsigned
-SPURegisterInfo::getFrameRegister(MachineFunction &MF) const
+SPURegisterInfo::getFrameRegister(const MachineFunction &MF) const
 {
   return SPU::R1;
 }

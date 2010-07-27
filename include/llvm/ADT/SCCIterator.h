@@ -22,8 +22,7 @@
 #define LLVM_ADT_SCCITERATOR_H
 
 #include "llvm/ADT/GraphTraits.h"
-#include "llvm/ADT/iterator.h"
-#include <map>
+#include "llvm/ADT/DenseMap.h"
 #include <vector>
 
 namespace llvm {
@@ -35,11 +34,13 @@ namespace llvm {
 ///
 template<class GraphT, class GT = GraphTraits<GraphT> >
 class scc_iterator
-  : public forward_iterator<std::vector<typename GT::NodeType>, ptrdiff_t> {
+  : public std::iterator<std::forward_iterator_tag,
+                         std::vector<typename GT::NodeType>, ptrdiff_t> {
   typedef typename GT::NodeType          NodeType;
   typedef typename GT::ChildIteratorType ChildItTy;
   typedef std::vector<NodeType*> SccTy;
-  typedef forward_iterator<SccTy, ptrdiff_t> super;
+  typedef std::iterator<std::forward_iterator_tag,
+                        std::vector<typename GT::NodeType>, ptrdiff_t> super;
   typedef typename super::reference reference;
   typedef typename super::pointer pointer;
 
@@ -47,7 +48,7 @@ class scc_iterator
   // visitNum is the global counter.
   // nodeVisitNumbers are per-node visit numbers, also used as DFS flags.
   unsigned visitNum;
-  std::map<NodeType *, unsigned> nodeVisitNumbers;
+  DenseMap<NodeType *, unsigned> nodeVisitNumbers;
 
   // SCCNodeStack - Stack holding nodes of the SCC.
   std::vector<NodeType *> SCCNodeStack;
@@ -71,7 +72,7 @@ class scc_iterator
     SCCNodeStack.push_back(N);
     MinVisitNumStack.push_back(visitNum);
     VisitStack.push_back(std::make_pair(N, GT::child_begin(N)));
-    //DOUT << "TarjanSCC: Node " << N <<
+    //dbgs() << "TarjanSCC: Node " << N <<
     //      " : visitNum = " << visitNum << "\n";
   }
 
@@ -106,7 +107,7 @@ class scc_iterator
       if (!MinVisitNumStack.empty() && MinVisitNumStack.back() > minVisitNum)
         MinVisitNumStack.back() = minVisitNum;
 
-      //DOUT << "TarjanSCC: Popped node " << visitingN <<
+      //dbgs() << "TarjanSCC: Popped node " << visitingN <<
       //      " : minVisitNum = " << minVisitNum << "; Node visit num = " <<
       //      nodeVisitNumbers[visitingN] << "\n";
 
@@ -135,8 +136,8 @@ public:
   typedef scc_iterator<GraphT, GT> _Self;
 
   // Provide static "constructors"...
-  static inline _Self begin(GraphT& G) { return _Self(GT::getEntryNode(G)); }
-  static inline _Self end  (GraphT& G) { return _Self(); }
+  static inline _Self begin(const GraphT& G) { return _Self(GT::getEntryNode(G)); }
+  static inline _Self end  (const GraphT& G) { return _Self(); }
 
   // Direct loop termination test (I.fini() is more efficient than I == end())
   inline bool fini() const {
@@ -185,13 +186,23 @@ public:
 
 // Global constructor for the SCC iterator.
 template <class T>
-scc_iterator<T> scc_begin(T G) {
+scc_iterator<T> scc_begin(const T& G) {
   return scc_iterator<T>::begin(G);
 }
 
 template <class T>
-scc_iterator<T> scc_end(T G) {
+scc_iterator<T> scc_end(const T& G) {
   return scc_iterator<T>::end(G);
+}
+
+template <class T>
+scc_iterator<Inverse<T> > scc_begin(const Inverse<T>& G) {
+       return scc_iterator<Inverse<T> >::begin(G);
+}
+
+template <class T>
+scc_iterator<Inverse<T> > scc_end(const Inverse<T>& G) {
+       return scc_iterator<Inverse<T> >::end(G);
 }
 
 } // End llvm namespace

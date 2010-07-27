@@ -11,7 +11,7 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "llvm/Target/TargetAsmInfo.h"
+#include "llvm/MC/MCAsmInfo.h"
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/Target/TargetOptions.h"
 #include "llvm/Support/CommandLine.h"
@@ -30,18 +30,21 @@ namespace llvm {
   bool FiniteOnlyFPMathOption;
   bool HonorSignDependentRoundingFPMathOption;
   bool UseSoftFloat;
+  FloatABI::ABIType FloatABIType;
   bool NoImplicitFloat;
   bool NoZerosInBSS;
-  bool ExceptionHandling;
+  bool DwarfExceptionHandling;
+  bool SjLjExceptionHandling;
+  bool JITEmitDebugInfo;
+  bool JITEmitDebugInfoToDisk;
   bool UnwindTablesMandatory;
   Reloc::Model RelocationModel;
   CodeModel::Model CMModel;
-  bool PerformTailCallOpt;
+  bool GuaranteedTailCallOpt;
   unsigned StackAlignment;
   bool RealignStack;
   bool DisableJumpTables;
   bool StrongPHIElim;
-  bool DisableRedZone;
   bool AsmVerbosityDefault(false);
 }
 
@@ -85,20 +88,51 @@ GenerateSoftFloatCalls("soft-float",
   cl::desc("Generate software floating point library calls"),
   cl::location(UseSoftFloat),
   cl::init(false));
-static cl::opt<bool, true>
-GenerateNoImplicitFloats("no-implicit-float",
-  cl::desc("Don't generate implicit floating point instructions (x86-only)"),
-  cl::location(NoImplicitFloat),
-  cl::init(false));
+static cl::opt<llvm::FloatABI::ABIType, true>
+FloatABIForCalls("float-abi",
+  cl::desc("Choose float ABI type"),
+  cl::location(FloatABIType),
+  cl::init(FloatABI::Default),
+  cl::values(
+    clEnumValN(FloatABI::Default, "default",
+               "Target default float ABI type"),
+    clEnumValN(FloatABI::Soft, "soft",
+               "Soft float ABI (implied by -soft-float)"),
+    clEnumValN(FloatABI::Hard, "hard",
+               "Hard float ABI (uses FP registers)"),
+    clEnumValEnd));
 static cl::opt<bool, true>
 DontPlaceZerosInBSS("nozero-initialized-in-bss",
   cl::desc("Don't place zero-initialized symbols into bss section"),
   cl::location(NoZerosInBSS),
   cl::init(false));
 static cl::opt<bool, true>
-EnableExceptionHandling("enable-eh",
+EnableDwarfExceptionHandling("enable-eh",
   cl::desc("Emit DWARF exception handling (default if target supports)"),
-  cl::location(ExceptionHandling),
+  cl::location(DwarfExceptionHandling),
+  cl::init(false));
+static cl::opt<bool, true>
+EnableSjLjExceptionHandling("enable-sjlj-eh",
+  cl::desc("Emit SJLJ exception handling (default if target supports)"),
+  cl::location(SjLjExceptionHandling),
+  cl::init(false));
+// In debug builds, make this default to true.
+#ifdef NDEBUG
+#define EMIT_DEBUG false
+#else
+#define EMIT_DEBUG true
+#endif
+static cl::opt<bool, true>
+EmitJitDebugInfo("jit-emit-debug",
+  cl::desc("Emit debug information to debugger"),
+  cl::location(JITEmitDebugInfo),
+  cl::init(EMIT_DEBUG));
+#undef EMIT_DEBUG
+static cl::opt<bool, true>
+EmitJitDebugInfoToDisk("jit-emit-debug-to-disk",
+  cl::Hidden,
+  cl::desc("Emit debug info objfiles to disk"),
+  cl::location(JITEmitDebugInfoToDisk),
   cl::init(false));
 static cl::opt<bool, true>
 EnableUnwindTables("unwind-tables",
@@ -139,9 +173,9 @@ DefCodeModel("code-model",
                "Large code model"),
     clEnumValEnd));
 static cl::opt<bool, true>
-EnablePerformTailCallOpt("tailcallopt",
-  cl::desc("Turn on tail call optimization."),
-  cl::location(PerformTailCallOpt),
+EnableGuaranteedTailCallOpt("tailcallopt",
+  cl::desc("Turn fastcc calls into tail calls by (potentially) changing ABI."),
+  cl::location(GuaranteedTailCallOpt),
   cl::init(false));
 static cl::opt<unsigned, true>
 OverrideStackAlignment("stack-alignment",
@@ -163,15 +197,18 @@ EnableStrongPHIElim(cl::Hidden, "strong-phi-elim",
   cl::desc("Use strong PHI elimination."),
   cl::location(StrongPHIElim),
   cl::init(false));
-static cl::opt<bool, true>
-DisableRedZoneOption("disable-red-zone",
-  cl::desc("Do not emit code that uses the red zone."),
-  cl::location(DisableRedZone),
-  cl::init(false));
 
 //---------------------------------------------------------------------------
 // TargetMachine Class
 //
+
+TargetMachine::TargetMachine(const Target &T) 
+  : TheTarget(T), AsmInfo(0) {
+  // Typically it will be subtargets that will adjust FloatABIType from Default
+  // to Soft or Hard.
+  if (UseSoftFloat)
+    FloatABIType = FloatABI::Soft;
+}
 
 TargetMachine::~TargetMachine() {
   delete AsmInfo;
@@ -226,4 +263,3 @@ namespace llvm {
     return !UnsafeFPMath && HonorSignDependentRoundingFPMathOption;
   }
 }
-

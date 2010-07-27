@@ -31,14 +31,6 @@ let hasCtrlDep = 1, Defs = [R1], Uses = [R1] in {
 }
 
 //===----------------------------------------------------------------------===//
-// DWARF debugging Pseudo Instructions
-//===----------------------------------------------------------------------===//
-
-def DWARF_LOC : Pseudo<(outs), (ins i32imm:$line, i32imm:$col, i32imm:$file),
-           ".loc $file, $line, $col",
-           [(dwarf_loc (i32 imm:$line), (i32 imm:$col), (i32 imm:$file))]>;
-
-//===----------------------------------------------------------------------===//
 // Loads:
 // NB: The ordering is actually important, since the instruction selection
 // will try each of the instructions in sequence, i.e., the D-form first with
@@ -2187,10 +2179,10 @@ multiclass ShiftLeftHalfwordImm
 defm SHLHI : ShiftLeftHalfwordImm;
 
 def : Pat<(SPUvec_shl (v8i16 VECREG:$rA), (i32 uimm7:$val)),
-          (SHLHIv8i16 VECREG:$rA, uimm7:$val)>;
+          (SHLHIv8i16 VECREG:$rA, (TO_IMM16 uimm7:$val))>;
 
 def : Pat<(shl R16C:$rA, (i32 uimm7:$val)),
-          (SHLHIr16 R16C:$rA, uimm7:$val)>;
+          (SHLHIr16 R16C:$rA, (TO_IMM16 uimm7:$val))>;
 
 //===----------------------------------------------------------------------===//
 
@@ -2378,7 +2370,7 @@ class ROTHInst<dag OOL, dag IOL, list<dag> pattern>:
 class ROTHVecInst<ValueType vectype>:
     ROTHInst<(outs VECREG:$rT), (ins VECREG:$rA, VECREG:$rB),
              [(set (vectype VECREG:$rT),
-                   (SPUvec_rotl VECREG:$rA, VECREG:$rB))]>;
+                   (SPUvec_rotl VECREG:$rA, (v8i16 VECREG:$rB)))]>;
 
 class ROTHRegInst<RegisterClass rclass>:
     ROTHInst<(outs rclass:$rT), (ins rclass:$rA, rclass:$rB),
@@ -2418,8 +2410,8 @@ multiclass RotateLeftHalfwordImm
 
 defm ROTHI: RotateLeftHalfwordImm;
 
-def : Pat<(SPUvec_rotl VECREG:$rA, (i32 uimm7:$val)),
-          (ROTHIv8i16 VECREG:$rA, imm:$val)>;
+def : Pat<(SPUvec_rotl (v8i16 VECREG:$rA), (i32 uimm7:$val)),
+          (ROTHIv8i16 VECREG:$rA, (TO_IMM16 imm:$val))>;
 
 //-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~
 // Rotate word:
@@ -2690,10 +2682,10 @@ def : Pat<(SPUvec_srl (v8i16 VECREG:$rA), (i32 imm:$val)),
           (ROTHMIv8i16 VECREG:$rA, imm:$val)>;
 
 def: Pat<(SPUvec_srl (v8i16 VECREG:$rA), (i16 imm:$val)),
-         (ROTHMIv8i16 VECREG:$rA, imm:$val)>;
+         (ROTHMIv8i16 VECREG:$rA, (TO_IMM32 imm:$val))>;
 
 def: Pat<(SPUvec_srl (v8i16 VECREG:$rA), (i8 imm:$val)),
-         (ROTHMIv8i16 VECREG:$rA, imm:$val)>;
+         (ROTHMIv8i16 VECREG:$rA, (TO_IMM32 imm:$val))>;
 
 def ROTHMIr16:
     ROTHMIInst<(outs R16C:$rT), (ins R16C:$rA, rothNeg7imm:$val),
@@ -2703,10 +2695,10 @@ def: Pat<(srl R16C:$rA, (i32 uimm7:$val)),
          (ROTHMIr16 R16C:$rA, uimm7:$val)>;
 
 def: Pat<(srl R16C:$rA, (i16 uimm7:$val)),
-         (ROTHMIr16 R16C:$rA, uimm7:$val)>;
+         (ROTHMIr16 R16C:$rA, (TO_IMM32 uimm7:$val))>;
 
 def: Pat<(srl R16C:$rA, (i8 uimm7:$val)),
-         (ROTHMIr16 R16C:$rA, uimm7:$val)>;
+         (ROTHMIr16 R16C:$rA, (TO_IMM32 uimm7:$val))>;
 
 // ROTM v4i32 form: See the ROTHM v8i16 comments.
 class ROTMInst<dag OOL, dag IOL, list<dag> pattern>:
@@ -2717,14 +2709,14 @@ def ROTMv4i32:
     ROTMInst<(outs VECREG:$rT), (ins VECREG:$rA, R32C:$rB),
              [/* see patterns below - $rB must be negated */]>;
 
-def : Pat<(SPUvec_srl VECREG:$rA, R32C:$rB),
+def : Pat<(SPUvec_srl (v4i32 VECREG:$rA), R32C:$rB),
           (ROTMv4i32 VECREG:$rA, (SFIr32 R32C:$rB, 0))>;
 
-def : Pat<(SPUvec_srl VECREG:$rA, R16C:$rB),
+def : Pat<(SPUvec_srl (v4i32 VECREG:$rA), R16C:$rB),
           (ROTMv4i32 VECREG:$rA,
                      (SFIr32 (XSHWr16 R16C:$rB), 0))>;
 
-def : Pat<(SPUvec_srl VECREG:$rA, R8C:$rB),
+def : Pat<(SPUvec_srl (v4i32 VECREG:$rA), R8C:$rB),
           (ROTMv4i32 VECREG:$rA,
                      (SFIr32 (XSHWr16 (XSBHr8 R8C:$rB)), 0))>;
 
@@ -2750,11 +2742,11 @@ def ROTMIv4i32:
       [(set (v4i32 VECREG:$rT),
             (SPUvec_srl VECREG:$rA, (i32 uimm7:$val)))]>;
 
-def : Pat<(SPUvec_srl VECREG:$rA, (i16 uimm7:$val)),
-          (ROTMIv4i32 VECREG:$rA, uimm7:$val)>;
+def : Pat<(SPUvec_srl (v4i32 VECREG:$rA), (i16 uimm7:$val)),
+          (ROTMIv4i32 VECREG:$rA, (TO_IMM32 uimm7:$val))>;
 
-def : Pat<(SPUvec_srl VECREG:$rA, (i8 uimm7:$val)),
-          (ROTMIv4i32 VECREG:$rA, uimm7:$val)>;
+def : Pat<(SPUvec_srl (v4i32 VECREG:$rA), (i8 uimm7:$val)),
+          (ROTMIv4i32 VECREG:$rA, (TO_IMM32 uimm7:$val))>;
 
 // ROTMI r32 form: know how to complement the immediate value.
 def ROTMIr32:
@@ -2763,10 +2755,10 @@ def ROTMIr32:
       [(set R32C:$rT, (srl R32C:$rA, (i32 uimm7:$val)))]>;
 
 def : Pat<(srl R32C:$rA, (i16 imm:$val)),
-          (ROTMIr32 R32C:$rA, uimm7:$val)>;
+          (ROTMIr32 R32C:$rA, (TO_IMM32 uimm7:$val))>;
 
 def : Pat<(srl R32C:$rA, (i8 imm:$val)),
-          (ROTMIr32 R32C:$rA, uimm7:$val)>;
+          (ROTMIr32 R32C:$rA, (TO_IMM32 uimm7:$val))>;
 
 //-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~
 // ROTQMBY: This is a vector form merely so that when used in an
@@ -2924,14 +2916,14 @@ def ROTMAHv8i16:
       "rotmah\t$rT, $rA, $rB", RotateShift,
       [/* see patterns below - $rB must be negated */]>;
 
-def : Pat<(SPUvec_sra VECREG:$rA, R32C:$rB),
+def : Pat<(SPUvec_sra (v8i16 VECREG:$rA), R32C:$rB),
           (ROTMAHv8i16 VECREG:$rA, (SFIr32 R32C:$rB, 0))>;
 
-def : Pat<(SPUvec_sra VECREG:$rA, R16C:$rB),
+def : Pat<(SPUvec_sra (v8i16 VECREG:$rA), R16C:$rB),
           (ROTMAHv8i16 VECREG:$rA,
                        (SFIr32 (XSHWr16 R16C:$rB), 0))>;
 
-def : Pat<(SPUvec_sra VECREG:$rA, R8C:$rB),
+def : Pat<(SPUvec_sra (v8i16 VECREG:$rA), R8C:$rB),
           (ROTMAHv8i16 VECREG:$rA,
                        (SFIr32 (XSHWr16 (XSBHr8 R8C:$rB)), 0))>;
 
@@ -2958,10 +2950,10 @@ def ROTMAHIv8i16:
             (SPUvec_sra (v8i16 VECREG:$rA), (i32 uimm7:$val)))]>;
 
 def : Pat<(SPUvec_sra (v8i16 VECREG:$rA), (i16 uimm7:$val)),
-          (ROTMAHIv8i16 (v8i16 VECREG:$rA), (i32 uimm7:$val))>;
+          (ROTMAHIv8i16 (v8i16 VECREG:$rA), (TO_IMM32 uimm7:$val))>;
 
 def : Pat<(SPUvec_sra (v8i16 VECREG:$rA), (i8 uimm7:$val)),
-          (ROTMAHIv8i16 (v8i16 VECREG:$rA), (i32 uimm7:$val))>;
+          (ROTMAHIv8i16 (v8i16 VECREG:$rA), (TO_IMM32 uimm7:$val))>;
 
 def ROTMAHIr16:
     RRForm<0b01111110000, (outs R16C:$rT), (ins R16C:$rA, rothNeg7imm_i16:$val),
@@ -2969,25 +2961,25 @@ def ROTMAHIr16:
       [(set R16C:$rT, (sra R16C:$rA, (i16 uimm7:$val)))]>;
 
 def : Pat<(sra R16C:$rA, (i32 imm:$val)),
-          (ROTMAHIr16 R16C:$rA, uimm7:$val)>;
+          (ROTMAHIr16 R16C:$rA, (TO_IMM32 uimm7:$val))>;
 
 def : Pat<(sra R16C:$rA, (i8 imm:$val)),
-          (ROTMAHIr16 R16C:$rA, uimm7:$val)>;
+          (ROTMAHIr16 R16C:$rA, (TO_IMM32 uimm7:$val))>;
 
 def ROTMAv4i32:
     RRForm<0b01011010000, (outs VECREG:$rT), (ins VECREG:$rA, R32C:$rB),
       "rotma\t$rT, $rA, $rB", RotateShift,
       [/* see patterns below - $rB must be negated */]>;
 
-def : Pat<(SPUvec_sra VECREG:$rA, R32C:$rB),
-          (ROTMAv4i32 (v4i32 VECREG:$rA), (SFIr32 R32C:$rB, 0))>;
+def : Pat<(SPUvec_sra (v4i32 VECREG:$rA), R32C:$rB),
+          (ROTMAv4i32 VECREG:$rA, (SFIr32 R32C:$rB, 0))>;
 
-def : Pat<(SPUvec_sra VECREG:$rA, R16C:$rB),
-          (ROTMAv4i32 (v4i32 VECREG:$rA),
+def : Pat<(SPUvec_sra (v4i32 VECREG:$rA), R16C:$rB),
+          (ROTMAv4i32 VECREG:$rA,
                       (SFIr32 (XSHWr16 R16C:$rB), 0))>;
 
-def : Pat<(SPUvec_sra VECREG:$rA, R8C:$rB),
-          (ROTMAv4i32 (v4i32 VECREG:$rA),
+def : Pat<(SPUvec_sra (v4i32 VECREG:$rA), R8C:$rB),
+          (ROTMAv4i32 VECREG:$rA,
                       (SFIr32 (XSHWr16 (XSBHr8 R8C:$rB)), 0))>;
 
 def ROTMAr32:
@@ -3601,21 +3593,23 @@ def : Pat<(SPUcall (SPUaform texternalsym:$func, 0)),
           (BRASL texternalsym:$func)>;
 
 // Unconditional branches:
-let isBranch = 1, isTerminator = 1, hasCtrlDep = 1, isBarrier = 1 in {
-  def BR :
-    UncondBranch<0b001001100, (outs), (ins brtarget:$dest),
-      "br\t$dest",
-      [(br bb:$dest)]>;
+let isBranch = 1, isTerminator = 1, hasCtrlDep = 1 in {
+  let isBarrier = 1 in {
+    def BR :
+      UncondBranch<0b001001100, (outs), (ins brtarget:$dest),
+        "br\t$dest",
+        [(br bb:$dest)]>;
 
-  // Unconditional, absolute address branch
-  def BRA:
-    UncondBranch<0b001100000, (outs), (ins brtarget:$dest),
-      "bra\t$dest",
-      [/* no pattern */]>;
+    // Unconditional, absolute address branch
+    def BRA:
+      UncondBranch<0b001100000, (outs), (ins brtarget:$dest),
+        "bra\t$dest",
+        [/* no pattern */]>;
 
-  // Indirect branch
-  def BI:
-    BIForm<0b00010101100, "bi\t$func", [(brind R32C:$func)]>;
+    // Indirect branch
+    def BI:
+      BIForm<0b00010101100, "bi\t$func", [(brind R32C:$func)]>;
+  }
 
   // Conditional branches:
   class BRNZInst<dag IOL, list<dag> pattern>:
@@ -4429,13 +4423,6 @@ def : Pat<(v4i32 v4i32Imm:$imm),
 // 8-bit constants
 def : Pat<(i8 imm:$imm),
           (ILHr8 imm:$imm)>;
-
-//===----------------------------------------------------------------------===//
-// Call instruction patterns:
-//===----------------------------------------------------------------------===//
-// Return void
-def : Pat<(ret),
-          (RET)>;
 
 //===----------------------------------------------------------------------===//
 // Zero/Any/Sign extensions

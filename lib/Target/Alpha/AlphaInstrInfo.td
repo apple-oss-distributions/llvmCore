@@ -69,7 +69,7 @@ def nearP2X : SDNodeXForm<imm, [{
 }]>;
 def nearP2RemX : SDNodeXForm<imm, [{
   uint64_t x =
-    abs(N->getZExtValue() - getNearPower2((uint64_t)N->getZExtValue()));
+    abs64(N->getZExtValue() - getNearPower2((uint64_t)N->getZExtValue()));
   return getI64Imm(Log2_64(x));
 }]>;
 
@@ -92,7 +92,7 @@ def immSExt16int  : PatLeaf<(imm), [{ //(int)imm fits in a 16 bit sign extended 
          ((int64_t)N->getZExtValue() << 32) >> 32;
 }], SExt16>;
 
-def zappat : PatFrag<(ops node:$LHS), (and node:$LHS, imm:$L), [{
+def zappat : PatFrag<(ops node:$LHS), (and node:$LHS, imm), [{
   ConstantSDNode *RHS = dyn_cast<ConstantSDNode>(N->getOperand(1));
   if (!RHS) return 0;
   uint64_t build = get_zapImm(N->getOperand(0), (uint64_t)RHS->getZExtValue());
@@ -124,7 +124,7 @@ def immRemP2 : PatLeaf<(imm), [{
                          getNearPower2((uint64_t)N->getZExtValue()));
 }]>;
 def immUExt8ME : PatLeaf<(imm), [{ //use this imm for mulqi
-  int64_t d =  abs((int64_t)N->getZExtValue() -
+  int64_t d =  abs64((int64_t)N->getZExtValue() -
                (int64_t)getNearPower2((uint64_t)N->getZExtValue()));
   if (isPowerOf2_64(d)) return false;
   switch (d) {
@@ -164,7 +164,7 @@ def MEMLABEL : PseudoInstAlpha<(outs), (ins s64imm:$i, s64imm:$j, s64imm:$k, s64
          "LSMARKER$$$i$$$j$$$k$$$m:", [], s_pseudo>;
 
 
-let usesCustomDAGSchedInserter = 1 in {   // Expanded by the scheduler.
+let usesCustomInserter = 1 in {   // Expanded after instruction selection.
 def CAS32 : PseudoInstAlpha<(outs GPRC:$dst), (ins GPRC:$ptr, GPRC:$cmp, GPRC:$swp), "",
       [(set GPRC:$dst, (atomic_cmp_swap_32 GPRC:$ptr, GPRC:$cmp, GPRC:$swp))], s_pseudo>;
 def CAS64 : PseudoInstAlpha<(outs GPRC:$dst), (ins GPRC:$ptr, GPRC:$cmp, GPRC:$swp), "",
@@ -391,7 +391,7 @@ def : Pat<(setune GPRC:$X, GPRC:$Y), (CMPEQi (CMPEQ GPRC:$X, GPRC:$Y), 0)>;
 def : Pat<(setune GPRC:$X, immUExt8:$Y), (CMPEQi (CMPEQ GPRC:$X, immUExt8:$Y), 0)>;
 
 
-let isReturn = 1, isTerminator = 1, Ra = 31, Rb = 26, disp = 1, Uses = [R26] in {
+let isReturn = 1, isTerminator = 1, isBarrier = 1, Ra = 31, Rb = 26, disp = 1, Uses = [R26] in {
   def RETDAG : MbrForm< 0x1A, 0x02, (ops), "ret $$31,($$26),1", s_jsr>; //Return from subroutine
   def RETDAGp : MbrpForm< 0x1A, 0x02, (ops), "ret $$31,($$26),1", [(retflag)], s_jsr>; //Return from subroutine
 }
@@ -602,9 +602,9 @@ def RPCC : MfcForm<0x18, 0xC000, "rpcc $RA", s_rpcc>; //Read process cycle count
 def MB  : MfcPForm<0x18, 0x4000, "mb",  s_imisc>; //memory barrier
 def WMB : MfcPForm<0x18, 0x4400, "wmb", s_imisc>; //write memory barrier
 
-def : Pat<(membarrier (i64 imm:$ll), (i64 imm:$ls), (i64 imm:$sl), (i64 1), (i64 imm:$dev)),
+def : Pat<(membarrier (i64 imm), (i64 imm), (i64 imm), (i64 1), (i64 imm)),
           (WMB)>;
-def : Pat<(membarrier (i64 imm:$ll), (i64 imm:$ls), (i64 imm:$sl), (i64 imm:$ss), (i64 imm:$dev)),
+def : Pat<(membarrier (i64 imm), (i64 imm), (i64 imm), (i64 imm), (i64 imm)),
           (MB)>;
 
 //Basic Floating point ops
@@ -702,7 +702,7 @@ def FCMOVNET : FPForm<0x17, 0x02B, "fcmovne $RCOND,$RTRUE,$RDEST", [], s_fcmov>;
 
 //misc FP selects
 //Select double
-     
+
 def : Pat<(select (seteq F8RC:$RA, F8RC:$RB), F8RC:$st, F8RC:$sf),
       (FCMOVNET F8RC:$sf, F8RC:$st, (CMPTEQ F8RC:$RA, F8RC:$RB))>;
 def : Pat<(select (setoeq F8RC:$RA, F8RC:$RB), F8RC:$st, F8RC:$sf),
@@ -791,12 +791,14 @@ def : Pat<(select (setule F8RC:$RA, F8RC:$RB), F4RC:$st, F4RC:$sf),
 
 
 let OutOperandList = (ops GPRC:$RC), InOperandList = (ops F4RC:$RA), Fb = 31 in 
-def FTOIS : FPForm<0x1C, 0x078, "ftois $RA,$RC",[], s_ftoi>; //Floating to integer move, S_floating
+def FTOIS : FPForm<0x1C, 0x078, "ftois $RA,$RC",
+        [(set GPRC:$RC, (bitconvert F4RC:$RA))], s_ftoi>; //Floating to integer move, S_floating
 let OutOperandList = (ops GPRC:$RC), InOperandList = (ops F8RC:$RA), Fb = 31 in 
 def FTOIT : FPForm<0x1C, 0x070, "ftoit $RA,$RC",
         [(set GPRC:$RC, (bitconvert F8RC:$RA))], s_ftoi>; //Floating to integer move
 let OutOperandList = (ops F4RC:$RC), InOperandList = (ops GPRC:$RA), Fb = 31 in 
-def ITOFS : FPForm<0x14, 0x004, "itofs $RA,$RC",[], s_itof>; //Integer to floating move, S_floating
+def ITOFS : FPForm<0x14, 0x004, "itofs $RA,$RC",
+    	[(set F4RC:$RC, (bitconvert GPRC:$RA))], s_itof>; //Integer to floating move, S_floating
 let OutOperandList = (ops F8RC:$RC), InOperandList = (ops GPRC:$RA), Fb = 31 in 
 def ITOFT : FPForm<0x14, 0x024, "itoft $RA,$RC",
         [(set F8RC:$RC, (bitconvert GPRC:$RA))], s_itof>; //Integer to floating move
@@ -818,6 +820,10 @@ let OutOperandList = (ops F4RC:$RC), InOperandList = (ops F8RC:$RB), Fa = 31 in
 def CVTTS : FPForm<0x16, 0x7AC, "cvtts/sui $RB,$RC",
                    [(set F4RC:$RC, (fround F8RC:$RB))], s_fadd>;
 
+def :  Pat<(select GPRC:$RC, F8RC:$st, F8RC:$sf),
+       (f64 (FCMOVEQT  F8RC:$st, F8RC:$sf, (ITOFT GPRC:$RC)))>; 
+def :  Pat<(select GPRC:$RC, F4RC:$st, F4RC:$sf),
+       (f32 (FCMOVEQS  F4RC:$st, F4RC:$sf, (ITOFT GPRC:$RC)))>; 
 
 /////////////////////////////////////////////////////////
 //Branching
@@ -886,7 +892,7 @@ def : Pat<(brcond (setge GPRC:$RA, 0), bb:$DISP),
       (COND_BRANCH_I (immBRCond 2),  GPRC:$RA, bb:$DISP)>;
 def : Pat<(brcond (setgt GPRC:$RA, 0), bb:$DISP), 
       (COND_BRANCH_I (immBRCond 3),  GPRC:$RA, bb:$DISP)>;
-def : Pat<(brcond (and   GPRC:$RA, 1), bb:$DISP), 
+def : Pat<(brcond (and GPRC:$RA, 1), bb:$DISP), 
       (COND_BRANCH_I (immBRCond 6),  GPRC:$RA, bb:$DISP)>;
 def : Pat<(brcond (setle GPRC:$RA, 0), bb:$DISP), 
       (COND_BRANCH_I (immBRCond 4),  GPRC:$RA, bb:$DISP)>;
@@ -1053,8 +1059,8 @@ def : Pat<(i64 immSExt16:$imm),
 def : Pat<(i64 immSExt16int:$imm),
           (ZAPNOTi (LDA (SExt16 immSExt16int:$imm), R31), 15)>;
 def : Pat<(i64 immConst2PartInt:$imm),
-          (ZAPNOTi (LDA (LL16 (SExt32 immConst2PartInt:$imm)), 
-                        (LDAH (LH16 (SExt32 immConst2PartInt:$imm)), R31)), 15)>;
+          (ZAPNOTi (LDA (LL16 (i64 (SExt32 immConst2PartInt:$imm))),
+                        (LDAH (LH16 (i64 (SExt32 immConst2PartInt:$imm))), R31)), 15)>;
 
 
 //TODO: I want to just define these like this!

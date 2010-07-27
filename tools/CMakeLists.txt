@@ -2,13 +2,19 @@
 # large and three small executables. This is done to minimize memory load
 # in parallel builds.  Please retain this ordering.
 
-if( NOT MSVC )
+if( NOT WIN32 OR MSYS OR CYGWIN )
+  # It is useful to build llvm-config before the other tools, so we
+  # have a fresh LibDeps.txt for regenerating the hard-coded library
+  # dependencies. llvm-config/CMakeLists.txt takes care of this but we
+  # must keep llvm-config as the first entry on the list of tools to
+  # be built.
   add_subdirectory(llvm-config)
-endif( NOT MSVC )
+endif()
 
 add_subdirectory(opt)
 add_subdirectory(llvm-as)
 add_subdirectory(llvm-dis)
+add_subdirectory(llvm-mc)
 
 add_subdirectory(llc)
 add_subdirectory(llvm-ranlib)
@@ -20,11 +26,7 @@ add_subdirectory(llvm-prof)
 add_subdirectory(llvm-link)
 add_subdirectory(lli)
 
-# gccas and gccld are deprecated:
-# add_subdirectory(gccas)
-# add_subdirectory(gccld)
 add_subdirectory(llvm-extract)
-add_subdirectory(llvm-db)
 
 add_subdirectory(bugpoint)
 add_subdirectory(llvm-bcanalyzer)
@@ -34,3 +36,5 @@ add_subdirectory(llvmc)
 if( EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/clang/CMakeLists.txt )
   add_subdirectory( ${CMAKE_CURRENT_SOURCE_DIR}/clang )
 endif( EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/clang/CMakeLists.txt )
+
+set(LLVM_COMMON_DEPENDS ${LLVM_COMMON_DEPENDS} PARENT_SCOPE)

@@ -19,7 +19,7 @@
 using namespace llvm;
 
 // runEnums - Print out enum values for all of the instructions.
-void InstrEnumEmitter::run(std::ostream &OS) {
+void InstrEnumEmitter::run(raw_ostream &OS) {
   EmitSourceFileHeader("Target Instruction Enum Values", OS);
   OS << "namespace llvm {\n\n";
 
@@ -29,7 +29,7 @@ void InstrEnumEmitter::run(std::ostream &OS) {
   std::string Namespace;
   for (CodeGenTarget::inst_iterator II = Target.inst_begin(), 
        E = Target.inst_end(); II != E; ++II) {
-    if (II->second.Namespace != "TargetInstrInfo") {
+    if (II->second.Namespace != "TargetOpcode") {
       Namespace = II->second.Namespace;
       break;
     }

@@ -18,12 +18,6 @@
 
 namespace llvm {
 
-enum NameDecorationStyle {
-  None,
-  StdCall,
-  FastCall
-};
-  
 /// X86MachineFunctionInfo - This class is derived from MachineFunction and
 /// contains private X86 target-specific information for each MachineFunction.
 class X86MachineFunctionInfo : public MachineFunctionInfo {
@@ -41,16 +35,11 @@ class X86MachineFunctionInfo : public MachineFunctionInfo {
   /// Used on windows platform for stdcall & fastcall name decoration
   unsigned BytesToPopOnReturn;
 
-  /// DecorationStyle - If the function requires additional name decoration,
-  /// DecorationStyle holds the right way to do so.
-  NameDecorationStyle DecorationStyle;
-
   /// ReturnAddrIndex - FrameIndex for return slot.
   int ReturnAddrIndex;
 
-  /// TailCallReturnAddrDelta - Delta the ReturnAddr stack slot is moved
-  /// Used for creating an area before the register spill area on the stack
-  /// the returnaddr can be savely move to this area
+  /// TailCallReturnAddrDelta - The number of bytes by which return address
+  /// stack slot is moved as the result of tail call optimization.
   int TailCallReturnAddrDelta;
 
   /// SRetReturnReg - Some subtargets require that sret lowering includes
@@ -67,20 +56,19 @@ public:
   X86MachineFunctionInfo() : ForceFramePointer(false),
                              CalleeSavedFrameSize(0),
                              BytesToPopOnReturn(0),
-                             DecorationStyle(None),
                              ReturnAddrIndex(0),
                              TailCallReturnAddrDelta(0),
                              SRetReturnReg(0),
                              GlobalBaseReg(0) {}
   
-  X86MachineFunctionInfo(MachineFunction &MF) : ForceFramePointer(false),
-                                                CalleeSavedFrameSize(0),
-                                                BytesToPopOnReturn(0),
-                                                DecorationStyle(None),
-                                                ReturnAddrIndex(0),
-                                                TailCallReturnAddrDelta(0),
-                                                SRetReturnReg(0),
-                                                GlobalBaseReg(0) {}
+  explicit X86MachineFunctionInfo(MachineFunction &MF)
+    : ForceFramePointer(false),
+      CalleeSavedFrameSize(0),
+      BytesToPopOnReturn(0),
+      ReturnAddrIndex(0),
+      TailCallReturnAddrDelta(0),
+      SRetReturnReg(0),
+      GlobalBaseReg(0) {}
   
   bool getForceFramePointer() const { return ForceFramePointer;} 
   void setForceFramePointer(bool forceFP) { ForceFramePointer = forceFP; }
@@ -90,9 +78,6 @@ public:
 
   unsigned getBytesToPopOnReturn() const { return BytesToPopOnReturn; }
   void setBytesToPopOnReturn (unsigned bytes) { BytesToPopOnReturn = bytes;}
-
-  NameDecorationStyle getDecorationStyle() const { return DecorationStyle; }
-  void setDecorationStyle(NameDecorationStyle style) { DecorationStyle = style;}
 
   int getRAIndex() const { return ReturnAddrIndex; }
   void setRAIndex(int Index) { ReturnAddrIndex = Index; }

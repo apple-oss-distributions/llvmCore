@@ -30,6 +30,8 @@
 #include "llvm/ADT/BitVector.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/Debug.h"
+#include "llvm/Support/ErrorHandling.h"
+#include "llvm/Support/raw_ostream.h"
 
 using namespace llvm;
 
@@ -142,9 +144,11 @@ eliminateCallFramePseudoInstr(MachineFunction &MF, MachineBasicBlock &MBB,
       
       if (!isU6 && !isImmU16(Amount)) {
         // FIX could emit multiple instructions in this case.
-        cerr << "eliminateCallFramePseudoInstr size too big: "
-             << Amount << "\n";
-        abort();
+#ifndef NDEBUG
+        errs() << "eliminateCallFramePseudoInstr size too big: "
+               << Amount << "\n";
+#endif
+        llvm_unreachable(0);
       }
 
       MachineInstr *New;
@@ -167,8 +171,10 @@ eliminateCallFramePseudoInstr(MachineFunction &MF, MachineBasicBlock &MBB,
   MBB.erase(I);
 }
 
-void XCoreRegisterInfo::eliminateFrameIndex(MachineBasicBlock::iterator II,
-                                            int SPAdj, RegScavenger *RS) const {
+unsigned
+XCoreRegisterInfo::eliminateFrameIndex(MachineBasicBlock::iterator II,
+                                       int SPAdj, FrameIndexValue *Value,
+                                       RegScavenger *RS) const {
   assert(SPAdj == 0 && "Unexpected");
   MachineInstr &MI = *II;
   DebugLoc dl = MI.getDebugLoc();
@@ -187,12 +193,13 @@ void XCoreRegisterInfo::eliminateFrameIndex(MachineBasicBlock::iterator II,
   int StackSize = MF.getFrameInfo()->getStackSize();
 
   #ifndef NDEBUG
-  DOUT << "\nFunction         : " << MF.getFunction()->getName() << "\n";
-  DOUT << "<--------->\n";
-  MI.print(DOUT);
-  DOUT << "FrameIndex         : " << FrameIndex << "\n";
-  DOUT << "FrameOffset        : " << Offset << "\n";
-  DOUT << "StackSize          : " << StackSize << "\n";
+  DEBUG(errs() << "\nFunction         : " 
+        << MF.getFunction()->getName() << "\n");
+  DEBUG(errs() << "<--------->\n");
+  DEBUG(MI.print(errs()));
+  DEBUG(errs() << "FrameIndex         : " << FrameIndex << "\n");
+  DEBUG(errs() << "FrameOffset        : " << Offset << "\n");
+  DEBUG(errs() << "StackSize          : " << StackSize << "\n");
   #endif
 
   Offset += StackSize;
@@ -203,10 +210,7 @@ void XCoreRegisterInfo::eliminateFrameIndex(MachineBasicBlock::iterator II,
   
   assert(Offset%4 == 0 && "Misaligned stack offset");
 
-  #ifndef NDEBUG
-  DOUT << "Offset             : " << Offset << "\n";
-  DOUT << "<--------->\n";
-  #endif
+  DEBUG(errs() << "Offset             : " << Offset << "\n" << "<--------->\n");
   
   Offset/=4;
   
@@ -224,63 +228,65 @@ void XCoreRegisterInfo::eliminateFrameIndex(MachineBasicBlock::iterator II,
     bool isUs = isImmUs(Offset);
     unsigned FramePtr = XCore::R10;
     
-    MachineInstr *New = 0;
     if (!isUs) {
       if (!RS) {
-        cerr << "eliminateFrameIndex Frame size too big: " << Offset << "\n";
-        abort();
+        std::string msg;
+        raw_string_ostream Msg(msg);
+        Msg << "eliminateFrameIndex Frame size too big: " << Offset;
+        llvm_report_error(Msg.str());
       }
       unsigned ScratchReg = RS->scavengeRegister(XCore::GRRegsRegisterClass, II,
                                                  SPAdj);
       loadConstant(MBB, II, ScratchReg, Offset, dl);
       switch (MI.getOpcode()) {
       case XCore::LDWFI:
-        New = BuildMI(MBB, II, dl, TII.get(XCore::LDW_3r), Reg)
+        BuildMI(MBB, II, dl, TII.get(XCore::LDW_3r), Reg)
               .addReg(FramePtr)
-              .addReg(ScratchReg, false, false, true);
+              .addReg(ScratchReg, RegState::Kill);
         break;
       case XCore::STWFI:
-        New = BuildMI(MBB, II, dl, TII.get(XCore::STW_3r))
-              .addReg(Reg, false, false, isKill)
+        BuildMI(MBB, II, dl, TII.get(XCore::STW_3r))
+              .addReg(Reg, getKillRegState(isKill))
               .addReg(FramePtr)
-              .addReg(ScratchReg, false, false, true);
+              .addReg(ScratchReg, RegState::Kill);
         break;
       case XCore::LDAWFI:
-        New = BuildMI(MBB, II, dl, TII.get(XCore::LDAWF_l3r), Reg)
+        BuildMI(MBB, II, dl, TII.get(XCore::LDAWF_l3r), Reg)
               .addReg(FramePtr)
-              .addReg(ScratchReg, false, false, true);
+              .addReg(ScratchReg, RegState::Kill);
         break;
       default:
-        assert(0 && "Unexpected Opcode\n");
+        llvm_unreachable("Unexpected Opcode");
       }
     } else {
       switch (MI.getOpcode()) {
       case XCore::LDWFI:
-        New = BuildMI(MBB, II, dl, TII.get(XCore::LDW_2rus), Reg)
+        BuildMI(MBB, II, dl, TII.get(XCore::LDW_2rus), Reg)
               .addReg(FramePtr)
               .addImm(Offset);
         break;
       case XCore::STWFI:
-        New = BuildMI(MBB, II, dl, TII.get(XCore::STW_2rus))
-              .addReg(Reg, false, false, isKill)
+        BuildMI(MBB, II, dl, TII.get(XCore::STW_2rus))
+              .addReg(Reg, getKillRegState(isKill))
               .addReg(FramePtr)
               .addImm(Offset);
         break;
       case XCore::LDAWFI:
-        New = BuildMI(MBB, II, dl, TII.get(XCore::LDAWF_l2rus), Reg)
+        BuildMI(MBB, II, dl, TII.get(XCore::LDAWF_l2rus), Reg)
               .addReg(FramePtr)
               .addImm(Offset);
         break;
       default:
-        assert(0 && "Unexpected Opcode\n");
+        llvm_unreachable("Unexpected Opcode");
       }
     }
   } else {
     bool isU6 = isImmU6(Offset);
     if (!isU6 && !isImmU16(Offset)) {
-      // FIXME could make this work for LDWSP, LDAWSP.
-      cerr << "eliminateFrameIndex Frame size too big: " << Offset << "\n";
-      abort();
+      std::string msg;
+      raw_string_ostream Msg(msg);
+      Msg << "eliminateFrameIndex Frame size too big: " << Offset;
+      llvm_report_error(Msg.str());
     }
 
     switch (MI.getOpcode()) {
@@ -293,7 +299,7 @@ void XCoreRegisterInfo::eliminateFrameIndex(MachineBasicBlock::iterator II,
     case XCore::STWFI:
       NewOpcode = (isU6) ? XCore::STWSP_ru6 : XCore::STWSP_lru6;
       BuildMI(MBB, II, dl, TII.get(NewOpcode))
-            .addReg(Reg, false, false, isKill)
+            .addReg(Reg, getKillRegState(isKill))
             .addImm(Offset);
       break;
     case XCore::LDAWFI:
@@ -302,11 +308,12 @@ void XCoreRegisterInfo::eliminateFrameIndex(MachineBasicBlock::iterator II,
             .addImm(Offset);
       break;
     default:
-      assert(0 && "Unexpected Opcode\n");
+      llvm_unreachable("Unexpected Opcode");
     }
   }
   // Erase old instruction.
   MBB.erase(II);
+  return 0;
 }
 
 void
@@ -323,9 +330,10 @@ XCoreRegisterInfo::processFunctionBeforeCalleeSavedScan(MachineFunction &MF,
     int FrameIdx;
     if (! isVarArg) {
       // A fixed offset of 0 allows us to save / restore LR using entsp / retsp.
-      FrameIdx = MFI->CreateFixedObject(RC->getSize(), 0);
+      FrameIdx = MFI->CreateFixedObject(RC->getSize(), 0, true, false);
     } else {
-      FrameIdx = MFI->CreateStackObject(RC->getSize(), RC->getAlignment());
+      FrameIdx = MFI->CreateStackObject(RC->getSize(), RC->getAlignment(),
+                                        false);
     }
     XFI->setUsesLR(FrameIdx);
     XFI->setLRSpillSlot(FrameIdx);
@@ -333,13 +341,15 @@ XCoreRegisterInfo::processFunctionBeforeCalleeSavedScan(MachineFunction &MF,
   if (requiresRegisterScavenging(MF)) {
     // Reserve a slot close to SP or frame pointer.
     RS->setScavengingFrameIndex(MFI->CreateStackObject(RC->getSize(),
-                                                RC->getAlignment()));
+                                                       RC->getAlignment(),
+                                                       false));
   }
   if (hasFP(MF)) {
     // A callee save register is used to hold the FP.
     // This needs saving / restoring in the epilogue / prologue.
     XFI->setFPSpillSlot(MFI->CreateStackObject(RC->getSize(),
-                        RC->getAlignment()));
+                                               RC->getAlignment(),
+                                               false));
   }
 }
 
@@ -354,8 +364,10 @@ loadConstant(MachineBasicBlock &MBB, MachineBasicBlock::iterator I,
   // TODO use mkmsk if possible.
   if (!isImmU16(Value)) {
     // TODO use constant pool.
-    cerr << "loadConstant value too big " << Value << "\n";
-    abort();
+    std::string msg;
+    raw_string_ostream Msg(msg);
+    Msg << "loadConstant value too big " << Value;
+    llvm_report_error(Msg.str());
   }
   int Opcode = isImmU6(Value) ? XCore::LDC_ru6 : XCore::LDC_lru6;
   BuildMI(MBB, I, dl, TII.get(Opcode), DstReg).addImm(Value);
@@ -368,8 +380,10 @@ storeToStack(MachineBasicBlock &MBB, MachineBasicBlock::iterator I,
   Offset/=4;
   bool isU6 = isImmU6(Offset);
   if (!isU6 && !isImmU16(Offset)) {
-    cerr << "storeToStack offset too big " << Offset << "\n";
-    abort();
+    std::string msg;
+    raw_string_ostream Msg(msg);
+    Msg << "storeToStack offset too big " << Offset;
+    llvm_report_error(Msg.str());
   }
   int Opcode = isU6 ? XCore::STWSP_ru6 : XCore::STWSP_lru6;
   BuildMI(MBB, I, dl, TII.get(Opcode))
@@ -384,8 +398,10 @@ loadFromStack(MachineBasicBlock &MBB, MachineBasicBlock::iterator I,
   Offset/=4;
   bool isU6 = isImmU6(Offset);
   if (!isU6 && !isImmU16(Offset)) {
-    cerr << "loadFromStack offset too big " << Offset << "\n";
-    abort();
+    std::string msg;
+    raw_string_ostream Msg(msg);
+    Msg << "loadFromStack offset too big " << Offset;
+    llvm_report_error(Msg.str());
   }
   int Opcode = isU6 ? XCore::LDWSP_ru6 : XCore::LDWSP_lru6;
   BuildMI(MBB, I, dl, TII.get(Opcode), DstReg)
@@ -414,8 +430,10 @@ void XCoreRegisterInfo::emitPrologue(MachineFunction &MF) const {
 
   if (!isU6 && !isImmU16(FrameSize)) {
     // FIXME could emit multiple instructions.
-    cerr << "emitPrologue Frame size too big: " << FrameSize << "\n";
-    abort();
+    std::string msg;
+    raw_string_ostream Msg(msg);
+    Msg << "emitPrologue Frame size too big: " << FrameSize;
+    llvm_report_error(Msg.str());
   }
   bool emitFrameMoves = needsFrameMoves(MF);
 
@@ -438,17 +456,17 @@ void XCoreRegisterInfo::emitPrologue(MachineFunction &MF) const {
       std::vector<MachineMove> &Moves = MMI->getFrameMoves();
       
       // Show update of SP.
-      unsigned FrameLabelId = MMI->NextLabelID();
-      BuildMI(MBB, MBBI, dl, TII.get(XCore::DBG_LABEL)).addImm(FrameLabelId);
+      MCSymbol *FrameLabel = MMI->getContext().CreateTempSymbol();
+      BuildMI(MBB, MBBI, dl, TII.get(XCore::DBG_LABEL)).addSym(FrameLabel);
       
       MachineLocation SPDst(MachineLocation::VirtualFP);
       MachineLocation SPSrc(MachineLocation::VirtualFP, -FrameSize * 4);
-      Moves.push_back(MachineMove(FrameLabelId, SPDst, SPSrc));
+      Moves.push_back(MachineMove(FrameLabel, SPDst, SPSrc));
       
       if (LRSavedOnEntry) {
         MachineLocation CSDst(MachineLocation::VirtualFP, 0);
         MachineLocation CSSrc(XCore::LR);
-        Moves.push_back(MachineMove(FrameLabelId, CSDst, CSSrc));
+        Moves.push_back(MachineMove(FrameLabel, CSDst, CSSrc));
       }
     }
     if (saveLR) {
@@ -457,12 +475,11 @@ void XCoreRegisterInfo::emitPrologue(MachineFunction &MF) const {
       MBB.addLiveIn(XCore::LR);
       
       if (emitFrameMoves) {
-        unsigned SaveLRLabelId = MMI->NextLabelID();
-        BuildMI(MBB, MBBI, dl, TII.get(XCore::DBG_LABEL)).addImm(SaveLRLabelId);
+        MCSymbol *SaveLRLabel = MMI->getContext().CreateTempSymbol();
+        BuildMI(MBB, MBBI, dl, TII.get(XCore::DBG_LABEL)).addSym(SaveLRLabel);
         MachineLocation CSDst(MachineLocation::VirtualFP, LRSpillOffset);
         MachineLocation CSSrc(XCore::LR);
-        MMI->getFrameMoves().push_back(MachineMove(SaveLRLabelId,
-                                                   CSDst, CSSrc));
+        MMI->getFrameMoves().push_back(MachineMove(SaveLRLabel, CSDst, CSSrc));
       }
     }
   }
@@ -474,12 +491,11 @@ void XCoreRegisterInfo::emitPrologue(MachineFunction &MF) const {
     // R10 is live-in. It is killed at the spill.
     MBB.addLiveIn(XCore::R10);
     if (emitFrameMoves) {
-      unsigned SaveR10LabelId = MMI->NextLabelID();
-      BuildMI(MBB, MBBI, dl, TII.get(XCore::DBG_LABEL)).addImm(SaveR10LabelId);
+      MCSymbol *SaveR10Label = MMI->getContext().CreateTempSymbol();
+      BuildMI(MBB, MBBI, dl, TII.get(XCore::DBG_LABEL)).addSym(SaveR10Label);
       MachineLocation CSDst(MachineLocation::VirtualFP, FPSpillOffset);
       MachineLocation CSSrc(XCore::R10);
-      MMI->getFrameMoves().push_back(MachineMove(SaveR10LabelId,
-                                                 CSDst, CSSrc));
+      MMI->getFrameMoves().push_back(MachineMove(SaveR10Label, CSDst, CSSrc));
     }
     // Set the FP from the SP.
     unsigned FramePtr = XCore::R10;
@@ -487,21 +503,21 @@ void XCoreRegisterInfo::emitPrologue(MachineFunction &MF) const {
       .addImm(0);
     if (emitFrameMoves) {
       // Show FP is now valid.
-      unsigned FrameLabelId = MMI->NextLabelID();
-      BuildMI(MBB, MBBI, dl, TII.get(XCore::DBG_LABEL)).addImm(FrameLabelId);
+      MCSymbol *FrameLabel = MMI->getContext().CreateTempSymbol();
+      BuildMI(MBB, MBBI, dl, TII.get(XCore::DBG_LABEL)).addSym(FrameLabel);
       MachineLocation SPDst(FramePtr);
       MachineLocation SPSrc(MachineLocation::VirtualFP);
-      MMI->getFrameMoves().push_back(MachineMove(FrameLabelId, SPDst, SPSrc));
+      MMI->getFrameMoves().push_back(MachineMove(FrameLabel, SPDst, SPSrc));
     }
   }
   
   if (emitFrameMoves) {
     // Frame moves for callee saved.
     std::vector<MachineMove> &Moves = MMI->getFrameMoves();
-    std::vector<std::pair<unsigned, CalleeSavedInfo> >&SpillLabels =
+    std::vector<std::pair<MCSymbol*, CalleeSavedInfo> >&SpillLabels =
         XFI->getSpillLabels();
     for (unsigned I = 0, E = SpillLabels.size(); I != E; ++I) {
-      unsigned SpillLabel = SpillLabels[I].first;
+      MCSymbol *SpillLabel = SpillLabels[I].first;
       CalleeSavedInfo &CSI = SpillLabels[I].second;
       int Offset = MFI->getObjectOffset(CSI.getFrameIdx());
       unsigned Reg = CSI.getReg();
@@ -538,8 +554,10 @@ void XCoreRegisterInfo::emitEpilogue(MachineFunction &MF,
 
   if (!isU6 && !isImmU16(FrameSize)) {
     // FIXME could emit multiple instructions.
-    cerr << "emitEpilogue Frame size too big: " << FrameSize << "\n";
-    abort();
+    std::string msg;
+    raw_string_ostream Msg(msg);
+    Msg << "emitEpilogue Frame size too big: " << FrameSize;
+    llvm_report_error(Msg.str());
   }
 
   if (FrameSize) {
@@ -576,7 +594,7 @@ int XCoreRegisterInfo::getDwarfRegNum(unsigned RegNum, bool isEH) const {
   return XCoreGenRegisterInfo::getDwarfRegNumFull(RegNum, 0);
 }
 
-unsigned XCoreRegisterInfo::getFrameRegister(MachineFunction &MF) const {
+unsigned XCoreRegisterInfo::getFrameRegister(const MachineFunction &MF) const {
   bool FP = hasFP(MF);
   
   return FP ? XCore::R10 : XCore::SP;

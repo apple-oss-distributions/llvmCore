@@ -17,10 +17,10 @@
 #ifndef CODEGEN_TARGET_H
 #define CODEGEN_TARGET_H
 
+#include "llvm/Support/raw_ostream.h"
 #include "CodeGenRegisters.h"
 #include "CodeGenInstruction.h"
 #include <algorithm>
-#include <iosfwd>
 #include <map>
 
 namespace llvm {
@@ -45,9 +45,6 @@ enum SDNP {
   SDNPSideEffect,
   SDNPMemOperand
 };
-
-// ComplexPattern attributes.
-enum CPAttr { CPAttrParentAsRoot };
 
 /// getValueType - Return the MVT::SimpleValueType that the specified TableGen
 /// record corresponds to.
@@ -86,6 +83,10 @@ public:
   /// getInstructionSet - Return the InstructionSet object.
   ///
   Record *getInstructionSet() const;
+
+  /// getAsmParser - Return the AssemblyParser definition for this target.
+  ///
+  Record *getAsmParser() const;
 
   /// getAsmWriter - Return the AssemblyWriter definition for this target.
   ///
@@ -166,7 +167,7 @@ public:
 
   /// getRegisterVTs - Find the union of all possible SimpleValueTypes for the
   /// specified physical register.
-  std::vector<unsigned char> getRegisterVTs(Record *R) const;
+  std::vector<MVT::SimpleValueType> getRegisterVTs(Record *R) const;
   
   const std::vector<MVT::SimpleValueType> &getLegalValueTypes() const {
     if (LegalValueTypes.empty()) ReadLegalValueTypes();
@@ -223,9 +224,8 @@ class ComplexPattern {
   std::string SelectFunc;
   std::vector<Record*> RootNodes;
   unsigned Properties; // Node properties
-  unsigned Attributes; // Pattern attributes
 public:
-  ComplexPattern() : NumOperands(0) {};
+  ComplexPattern() : NumOperands(0) {}
   ComplexPattern(Record *R);
 
   MVT::SimpleValueType getValueType() const { return Ty; }
@@ -235,7 +235,6 @@ public:
     return RootNodes;
   }
   bool hasProperty(enum SDNP Prop) const { return Properties & (1 << Prop); }
-  bool hasAttribute(enum CPAttr Attr) const { return Attributes & (1 << Attr); }
 };
 
 } // End llvm namespace

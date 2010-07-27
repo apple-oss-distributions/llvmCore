@@ -19,12 +19,18 @@ include "llvm/Target/Target.td"
 //===----------------------------------------------------------------------===//
 // X86 Subtarget features.
 //===----------------------------------------------------------------------===//
- 
+
+def FeatureCMOV    : SubtargetFeature<"cmov","HasCMov", "true",
+                                      "Enable conditional move instructions">;
+
+
 def FeatureMMX     : SubtargetFeature<"mmx","X86SSELevel", "MMX",
                                       "Enable MMX instructions">;
 def FeatureSSE1    : SubtargetFeature<"sse", "X86SSELevel", "SSE1",
                                       "Enable SSE instructions",
-                                      [FeatureMMX]>;
+                                      // SSE codegen depends on cmovs, and all
+                                      // SSE1+ processors support them. 
+                                      [FeatureMMX, FeatureCMOV]>;
 def FeatureSSE2    : SubtargetFeature<"sse2", "X86SSELevel", "SSE2",
                                       "Enable SSE2 instructions",
                                       [FeatureSSE1]>;
@@ -49,9 +55,22 @@ def Feature3DNowA  : SubtargetFeature<"3dnowa", "X863DNowLevel", "ThreeDNowA",
 // feature, because SSE2 can be disabled (e.g. for compiling OS kernels)
 // without disabling 64-bit mode.
 def Feature64Bit   : SubtargetFeature<"64bit", "HasX86_64", "true",
-                                      "Support 64-bit instructions">;
+                                      "Support 64-bit instructions",
+                                      [FeatureCMOV]>;
 def FeatureSlowBTMem : SubtargetFeature<"slow-bt-mem", "IsBTMemSlow", "true",
                                        "Bit testing of memory is slow">;
+def FeatureSSE4A   : SubtargetFeature<"sse4a", "HasSSE4A", "true",
+                                      "Support SSE 4a instructions">;
+
+def FeatureAVX     : SubtargetFeature<"avx", "HasAVX", "true",
+                                      "Enable AVX instructions">;
+def FeatureFMA3    : SubtargetFeature<"fma3", "HasFMA3", "true",
+                                     "Enable three-operand fused multiple-add">;
+def FeatureFMA4    : SubtargetFeature<"fma4", "HasFMA4", "true",
+                                      "Enable four-operand fused multiple-add">;
+def FeatureVectorUAMem : SubtargetFeature<"vector-unaligned-mem",
+                                          "HasVectorUAMem", "true",
+                 "Allow unaligned memory operands on vector/SIMD instructions">;
 
 //===----------------------------------------------------------------------===//
 // X86 processors supported.
@@ -67,8 +86,8 @@ def : Proc<"i586",            []>;
 def : Proc<"pentium",         []>;
 def : Proc<"pentium-mmx",     [FeatureMMX]>;
 def : Proc<"i686",            []>;
-def : Proc<"pentiumpro",      []>;
-def : Proc<"pentium2",        [FeatureMMX]>;
+def : Proc<"pentiumpro",      [FeatureCMOV]>;
+def : Proc<"pentium2",        [FeatureMMX, FeatureCMOV]>;
 def : Proc<"pentium3",        [FeatureSSE1]>;
 def : Proc<"pentium-m",       [FeatureSSE2, FeatureSlowBTMem]>;
 def : Proc<"pentium4",        [FeatureSSE2]>;
@@ -80,6 +99,9 @@ def : Proc<"core2",           [FeatureSSSE3,  Feature64Bit, FeatureSlowBTMem]>;
 def : Proc<"penryn",          [FeatureSSE41,  Feature64Bit, FeatureSlowBTMem]>;
 def : Proc<"atom",            [FeatureSSE3,   Feature64Bit, FeatureSlowBTMem]>;
 def : Proc<"corei7",          [FeatureSSE42,  Feature64Bit, FeatureSlowBTMem]>;
+def : Proc<"nehalem",         [FeatureSSE42,  Feature64Bit, FeatureSlowBTMem]>;
+// Sandy Bridge does not have FMA
+def : Proc<"sandybridge",     [FeatureSSE42,  FeatureAVX,   Feature64Bit]>;
 
 def : Proc<"k6",              [FeatureMMX]>;
 def : Proc<"k6-2",            [FeatureMMX,    Feature3DNow]>;
@@ -97,6 +119,20 @@ def : Proc<"athlon64",        [FeatureSSE2,   Feature3DNowA, Feature64Bit,
                                FeatureSlowBTMem]>;
 def : Proc<"athlon-fx",       [FeatureSSE2,   Feature3DNowA, Feature64Bit,
                                FeatureSlowBTMem]>;
+def : Proc<"k8-sse3",         [FeatureSSE3,   Feature3DNowA, Feature64Bit,
+                               FeatureSlowBTMem]>;
+def : Proc<"opteron-sse3",    [FeatureSSE3,   Feature3DNowA, Feature64Bit,
+                               FeatureSlowBTMem]>;
+def : Proc<"athlon64-sse3",   [FeatureSSE3,   Feature3DNowA, Feature64Bit,
+                               FeatureSlowBTMem]>;
+def : Proc<"amdfam10",        [FeatureSSE3,   FeatureSSE4A,
+                               Feature3DNowA, Feature64Bit, FeatureSlowBTMem]>;
+def : Proc<"barcelona",       [FeatureSSE3,   FeatureSSE4A,
+                               Feature3DNowA, Feature64Bit, FeatureSlowBTMem]>;
+def : Proc<"istanbul",        [Feature3DNowA, Feature64Bit, FeatureSSE4A,
+                               Feature3DNowA]>;
+def : Proc<"shanghai",        [Feature3DNowA, Feature64Bit, FeatureSSE4A,
+                               Feature3DNowA]>;
 
 def : Proc<"winchip-c6",      [FeatureMMX]>;
 def : Proc<"winchip2",        [FeatureMMX, Feature3DNow]>;
@@ -124,8 +160,8 @@ def X86InstrInfo : InstrInfo {
                        "hasAdSizePrefix",
                        "Prefix",
                        "hasREX_WPrefix",
-                       "ImmTypeBits",
-                       "FPFormBits",
+                       "ImmT.Value",
+                       "FPForm.Value",
                        "hasLockPrefix",
                        "SegOvrBits",
                        "Opcode"];
@@ -152,21 +188,34 @@ include "X86CallingConv.td"
 // Assembly Printers
 //===----------------------------------------------------------------------===//
 
+// Currently the X86 assembly parser only supports ATT syntax.
+def ATTAsmParser : AsmParser {
+  string AsmParserClassName  = "ATTAsmParser";
+  int Variant = 0;
+
+  // Discard comments in assembly strings.
+  string CommentDelimiter = "#";
+
+  // Recognize hard coded registers.
+  string RegisterPrefix = "%";
+}
+
 // The X86 target supports two different syntaxes for emitting machine code.
 // This is controlled by the -x86-asm-syntax={att|intel}
 def ATTAsmWriter : AsmWriter {
-  string AsmWriterClassName  = "ATTAsmPrinter";
+  string AsmWriterClassName  = "ATTInstPrinter";
   int Variant = 0;
 }
 def IntelAsmWriter : AsmWriter {
-  string AsmWriterClassName  = "IntelAsmPrinter";
+  string AsmWriterClassName  = "IntelInstPrinter";
   int Variant = 1;
 }
-
 
 def X86 : Target {
   // Information about the instructions...
   let InstructionSet = X86InstrInfo;
+
+  let AssemblyParsers = [ATTAsmParser];
 
   let AssemblyWriters = [ATTAsmWriter, IntelAsmWriter];
 }

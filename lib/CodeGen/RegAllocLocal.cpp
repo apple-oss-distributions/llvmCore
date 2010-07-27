@@ -24,7 +24,8 @@
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
-#include "llvm/Support/Compiler.h"
+#include "llvm/Support/ErrorHandling.h"
+#include "llvm/Support/raw_ostream.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/IndexedMap.h"
 #include "llvm/ADT/SmallSet.h"
@@ -42,7 +43,7 @@ static RegisterRegAlloc
                 createLocalRegisterAllocator);
 
 namespace {
-  class VISIBILITY_HIDDEN RALocal : public MachineFunctionPass {
+  class RALocal : public MachineFunctionPass {
   public:
     static char ID;
     RALocal() : MachineFunctionPass(&ID), StackSlotForVirtReg(-1) {}
@@ -151,6 +152,7 @@ namespace {
     }
 
     virtual void getAnalysisUsage(AnalysisUsage &AU) const {
+      AU.setPreservesCFG();
       AU.addRequiredID(PHIEliminationID);
       AU.addRequiredID(TwoAddressInstructionPassID);
       MachineFunctionPass::getAnalysisUsage(AU);
@@ -226,19 +228,22 @@ namespace {
     unsigned getReg(MachineBasicBlock &MBB, MachineInstr *MI,
                     unsigned VirtReg, bool NoFree = false);
 
-    /// reloadVirtReg - This method transforms the specified specified virtual
+    /// reloadVirtReg - This method transforms the specified virtual
     /// register use to refer to a physical register.  This method may do this
     /// in one of several ways: if the register is available in a physical
     /// register already, it uses that physical register.  If the value is not
     /// in a physical register, and if there are physical registers available,
-    /// it loads it into a register.  If register pressure is high, and it is
-    /// possible, it tries to fold the load of the virtual register into the
-    /// instruction itself.  It avoids doing this if register pressure is low to
-    /// improve the chance that subsequent instructions can use the reloaded
-    /// value.  This method returns the modified instruction.
+    /// it loads it into a register: PhysReg if that is an available physical
+    /// register, otherwise any physical register of the right class.
+    /// If register pressure is high, and it is possible, it tries to fold the
+    /// load of the virtual register into the instruction itself.  It avoids
+    /// doing this if register pressure is low to improve the chance that
+    /// subsequent instructions can use the reloaded value.  This method
+    /// returns the modified instruction.
     ///
     MachineInstr *reloadVirtReg(MachineBasicBlock &MBB, MachineInstr *MI,
-                                unsigned OpNum, SmallSet<unsigned, 4> &RRegs);
+                                unsigned OpNum, SmallSet<unsigned, 4> &RRegs,
+                                unsigned PhysReg);
 
     /// ComputeLocalLiveness - Computes liveness of registers within a basic
     /// block, setting the killed/dead flags as appropriate.
@@ -259,8 +264,8 @@ int RALocal::getStackSpaceFor(unsigned VirtReg, const TargetRegisterClass *RC) {
     return SS;          // Already has space allocated?
 
   // Allocate a new stack object for this spill location...
-  int FrameIdx = MF->getFrameInfo()->CreateStackObject(RC->getSize(),
-                                                       RC->getAlignment());
+  int FrameIdx = MF->getFrameInfo()->CreateSpillStackObject(RC->getSize(),
+                                                            RC->getAlignment());
 
   // Assign the slot...
   StackSlotForVirtReg[VirtReg] = FrameIdx;
@@ -291,11 +296,11 @@ void RALocal::spillVirtReg(MachineBasicBlock &MBB,
   assert(VirtReg && "Spilling a physical register is illegal!"
          " Must not have appropriate kill for the register or use exists beyond"
          " the intended one.");
-  DOUT << "  Spilling register " << TRI->getName(PhysReg)
-       << " containing %reg" << VirtReg;
+  DEBUG(dbgs() << "  Spilling register " << TRI->getName(PhysReg)
+               << " containing %reg" << VirtReg);
   
   if (!isVirtRegModified(VirtReg)) {
-    DOUT << " which has not been modified, so no store necessary!";
+    DEBUG(dbgs() << " which has not been modified, so no store necessary!");
     std::pair<MachineInstr*, unsigned> &LastUse = getVirtRegLastUse(VirtReg);
     if (LastUse.first)
       LastUse.first->getOperand(LastUse.second).setIsKill();
@@ -305,7 +310,7 @@ void RALocal::spillVirtReg(MachineBasicBlock &MBB,
     // modified.
     const TargetRegisterClass *RC = MF->getRegInfo().getRegClass(VirtReg);
     int FrameIndex = getStackSpaceFor(VirtReg, RC);
-    DOUT << " to stack slot #" << FrameIndex;
+    DEBUG(dbgs() << " to stack slot #" << FrameIndex);
     // If the instruction reads the register that's spilled, (e.g. this can
     // happen if it is a move to a physical register), then the spill
     // instruction is not a kill.
@@ -316,7 +321,7 @@ void RALocal::spillVirtReg(MachineBasicBlock &MBB,
 
   getVirt2PhysRegMapSlot(VirtReg) = 0;   // VirtReg no longer available
 
-  DOUT << "\n";
+  DEBUG(dbgs() << '\n');
   removePhysReg(PhysReg);
 }
 
@@ -464,35 +469,44 @@ unsigned RALocal::getReg(MachineBasicBlock &MBB, MachineInstr *I,
 }
 
 
-/// reloadVirtReg - This method transforms the specified specified virtual
+/// reloadVirtReg - This method transforms the specified virtual
 /// register use to refer to a physical register.  This method may do this in
 /// one of several ways: if the register is available in a physical register
 /// already, it uses that physical register.  If the value is not in a physical
 /// register, and if there are physical registers available, it loads it into a
+/// register: PhysReg if that is an available physical register, otherwise any
 /// register.  If register pressure is high, and it is possible, it tries to
 /// fold the load of the virtual register into the instruction itself.  It
 /// avoids doing this if register pressure is low to improve the chance that
-/// subsequent instructions can use the reloaded value.  This method returns the
-/// modified instruction.
+/// subsequent instructions can use the reloaded value.  This method returns
+/// the modified instruction.
 ///
 MachineInstr *RALocal::reloadVirtReg(MachineBasicBlock &MBB, MachineInstr *MI,
                                      unsigned OpNum,
-                                     SmallSet<unsigned, 4> &ReloadedRegs) {
+                                     SmallSet<unsigned, 4> &ReloadedRegs,
+                                     unsigned PhysReg) {
   unsigned VirtReg = MI->getOperand(OpNum).getReg();
 
   // If the virtual register is already available, just update the instruction
   // and return.
   if (unsigned PR = getVirt2PhysRegMapSlot(VirtReg)) {
-    MarkPhysRegRecentlyUsed(PR);       // Already have this value available!
     MI->getOperand(OpNum).setReg(PR);  // Assign the input register
-    getVirtRegLastUse(VirtReg) = std::make_pair(MI, OpNum);
+    if (!MI->isDebugValue()) {
+      // Do not do these for DBG_VALUE as they can affect codegen.
+      MarkPhysRegRecentlyUsed(PR);       // Already have this value available!
+      getVirtRegLastUse(VirtReg) = std::make_pair(MI, OpNum);
+    }
     return MI;
   }
 
   // Otherwise, we need to fold it into the current instruction, or reload it.
   // If we have registers available to hold the value, use them.
   const TargetRegisterClass *RC = MF->getRegInfo().getRegClass(VirtReg);
-  unsigned PhysReg = getFreeReg(RC);
+  // If we already have a PhysReg (this happens when the instruction is a
+  // reg-to-reg copy with a PhysReg destination) use that.
+  if (!PhysReg || !TargetRegisterInfo::isPhysicalRegister(PhysReg) ||
+      !isPhysRegAvailable(PhysReg))
+    PhysReg = getFreeReg(RC);
   int FrameIndex = getStackSpaceFor(VirtReg, RC);
 
   if (PhysReg) {   // Register is available, allocate it!
@@ -505,8 +519,8 @@ MachineInstr *RALocal::reloadVirtReg(MachineBasicBlock &MBB, MachineInstr *MI,
 
   markVirtRegModified(VirtReg, false);   // Note that this reg was just reloaded
 
-  DOUT << "  Reloading %reg" << VirtReg << " into "
-       << TRI->getName(PhysReg) << "\n";
+  DEBUG(dbgs() << "  Reloading %reg" << VirtReg << " into "
+               << TRI->getName(PhysReg) << "\n");
 
   // Add move instruction(s)
   TII->loadRegFromStackSlot(MBB, MI, PhysReg, FrameIndex, RC);
@@ -517,24 +531,28 @@ MachineInstr *RALocal::reloadVirtReg(MachineBasicBlock &MBB, MachineInstr *MI,
   getVirtRegLastUse(VirtReg) = std::make_pair(MI, OpNum);
 
   if (!ReloadedRegs.insert(PhysReg)) {
-    cerr << "Ran out of registers during register allocation!\n";
-    if (MI->getOpcode() == TargetInstrInfo::INLINEASM) {
-      cerr << "Please check your inline asm statement for invalid "
+    std::string msg;
+    raw_string_ostream Msg(msg);
+    Msg << "Ran out of registers during register allocation!";
+    if (MI->isInlineAsm()) {
+      Msg << "\nPlease check your inline asm statement for invalid "
            << "constraints:\n";
-      MI->print(cerr.stream(), TM);
+      MI->print(Msg, TM);
     }
-    exit(1);
+    llvm_report_error(Msg.str());
   }
   for (const unsigned *SubRegs = TRI->getSubRegisters(PhysReg);
        *SubRegs; ++SubRegs) {
     if (!ReloadedRegs.insert(*SubRegs)) {
-      cerr << "Ran out of registers during register allocation!\n";
-      if (MI->getOpcode() == TargetInstrInfo::INLINEASM) {
-        cerr << "Please check your inline asm statement for invalid "
+      std::string msg;
+      raw_string_ostream Msg(msg);
+      Msg << "Ran out of registers during register allocation!";
+      if (MI->isInlineAsm()) {
+        Msg << "\nPlease check your inline asm statement for invalid "
              << "constraints:\n";
-        MI->print(cerr.stream(), TM);
+        MI->print(Msg, TM);
       }
-      exit(1);
+      llvm_report_error(Msg.str());
     }
   }
 
@@ -594,6 +612,8 @@ void RALocal::ComputeLocalLiveness(MachineBasicBlock& MBB) {
   DenseMap<unsigned, std::pair<MachineInstr*, unsigned> > LastUseDef;
   for (MachineBasicBlock::iterator I = MBB.begin(), E = MBB.end();
        I != E; ++I) {
+    if (I->isDebugValue())
+      continue;
     for (unsigned i = 0, e = I->getNumOperands(); i != e; ++i) {
       MachineOperand& MO = I->getOperand(i);
       // Uses don't trigger any flags, but we need to save
@@ -651,8 +671,10 @@ void RALocal::ComputeLocalLiveness(MachineBasicBlock& MBB) {
   
   // Live-out (of the function) registers contain return values of the function,
   // so we need to make sure they are alive at return time.
-  if (!MBB.empty() && MBB.back().getDesc().isReturn()) {
-    MachineInstr* Ret = &MBB.back();
+  MachineBasicBlock::iterator Ret = MBB.getFirstTerminator();
+  bool BBEndsInReturn = (Ret != MBB.end() && Ret->getDesc().isReturn());
+
+  if (BBEndsInReturn)
     for (MachineRegisterInfo::liveout_iterator
          I = MF->getRegInfo().liveout_begin(),
          E = MF->getRegInfo().liveout_end(); I != E; ++I)
@@ -660,7 +682,6 @@ void RALocal::ComputeLocalLiveness(MachineBasicBlock& MBB) {
         Ret->addOperand(MachineOperand::CreateReg(*I, false, true));
         LastUseDef[*I] = std::make_pair(Ret, Ret->getNumOperands()-1);
       }
-  }
   
   // Finally, loop over the final use/def of each reg 
   // in the block and determine if it is dead.
@@ -676,30 +697,56 @@ void RALocal::ComputeLocalLiveness(MachineBasicBlock& MBB) {
     bool usedOutsideBlock = isPhysReg ? false :   
           UsedInMultipleBlocks.test(MO.getReg() -  
                                     TargetRegisterInfo::FirstVirtualRegister);
-    if (!isPhysReg && !usedOutsideBlock)
+
+    // If the machine BB ends in a return instruction, then the value isn't used
+    // outside of the BB.
+    if (!isPhysReg && (!usedOutsideBlock || BBEndsInReturn)) {
+      // DBG_VALUE complicates this:  if the only refs of a register outside
+      // this block are DBG_VALUE, we can't keep the reg live just for that,
+      // as it will cause the reg to be spilled at the end of this block when
+      // it wouldn't have been otherwise.  Nullify the DBG_VALUEs when that
+      // happens.
+      bool UsedByDebugValueOnly = false;
       for (MachineRegisterInfo::reg_iterator UI = MRI.reg_begin(MO.getReg()),
-           UE = MRI.reg_end(); UI != UE; ++UI)
+             UE = MRI.reg_end(); UI != UE; ++UI) {
         // Two cases:
         // - used in another block
         // - used in the same block before it is defined (loop)
         if (UI->getParent() != &MBB ||
             (MO.isDef() && UI.getOperand().isUse() && precedes(&*UI, MI))) {
+          if (UI->isDebugValue()) {
+            UsedByDebugValueOnly = true;
+            continue;
+          }
+
+          // A non-DBG_VALUE use means we can leave DBG_VALUE uses alone.
           UsedInMultipleBlocks.set(MO.getReg() - 
                                    TargetRegisterInfo::FirstVirtualRegister);
           usedOutsideBlock = true;
+          UsedByDebugValueOnly = false;
           break;
         }
-    
-    // Physical registers and those that are not live-out of the block
-    // are killed/dead at their last use/def within this block.
-    if (isPhysReg || !usedOutsideBlock) {
+      }
+
+      if (UsedByDebugValueOnly)
+        for (MachineRegisterInfo::reg_iterator UI = MRI.reg_begin(MO.getReg()),
+             UE = MRI.reg_end(); UI != UE; ++UI)
+          if (UI->isDebugValue() &&
+              (UI->getParent() != &MBB ||
+               (MO.isDef() && precedes(&*UI, MI))))
+            UI.getOperand().setReg(0U);
+    }
+  
+    // Physical registers and those that are not live-out of the block are
+    // killed/dead at their last use/def within this block.
+    if (isPhysReg || !usedOutsideBlock || BBEndsInReturn)
       if (MO.isUse()) {
         // Don't mark uses that are tied to defs as kills.
         if (!MI->isRegTiedToDefOperand(idx))
           MO.setIsKill(true);
-      } else
+      } else {
         MO.setIsDead(true);
-    }
+      }
   }
 }
 
@@ -707,8 +754,11 @@ void RALocal::AllocateBasicBlock(MachineBasicBlock &MBB) {
   // loop over each instruction
   MachineBasicBlock::iterator MII = MBB.begin();
   
-  DEBUG(const BasicBlock *LBB = MBB.getBasicBlock();
-        if (LBB) DOUT << "\nStarting RegAlloc of BB: " << LBB->getName());
+  DEBUG({
+      const BasicBlock *LBB = MBB.getBasicBlock();
+      if (LBB)
+        dbgs() << "\nStarting RegAlloc of BB: " << LBB->getName();
+    });
 
   // Add live-in registers as active.
   for (MachineBasicBlock::livein_iterator I = MBB.livein_begin(),
@@ -733,13 +783,24 @@ void RALocal::AllocateBasicBlock(MachineBasicBlock &MBB) {
   while (MII != MBB.end()) {
     MachineInstr *MI = MII++;
     const TargetInstrDesc &TID = MI->getDesc();
-    DEBUG(DOUT << "\nStarting RegAlloc of: " << *MI;
-          DOUT << "  Regs have values: ";
-          for (unsigned i = 0; i != TRI->getNumRegs(); ++i)
-            if (PhysRegsUsed[i] != -1 && PhysRegsUsed[i] != -2)
-               DOUT << "[" << TRI->getName(i)
-                    << ",%reg" << PhysRegsUsed[i] << "] ";
-          DOUT << "\n");
+    DEBUG({
+        dbgs() << "\nStarting RegAlloc of: " << *MI;
+        dbgs() << "  Regs have values: ";
+        for (unsigned i = 0; i != TRI->getNumRegs(); ++i)
+          if (PhysRegsUsed[i] != -1 && PhysRegsUsed[i] != -2)
+            dbgs() << "[" << TRI->getName(i)
+                   << ",%reg" << PhysRegsUsed[i] << "] ";
+        dbgs() << '\n';
+      });
+
+    // Determine whether this is a copy instruction.  The cases where the
+    // source or destination are phys regs are handled specially.
+    unsigned SrcCopyReg, DstCopyReg, SrcCopySubReg, DstCopySubReg;
+    unsigned SrcCopyPhysReg = 0U;
+    bool isCopy = TII->isMoveInstr(*MI, SrcCopyReg, DstCopyReg, 
+                                   SrcCopySubReg, DstCopySubReg);
+    if (isCopy && TargetRegisterInfo::isVirtualRegister(SrcCopyReg))
+      SrcCopyPhysReg = getVirt2PhysRegMapSlot(SrcCopyReg);
 
     // Loop over the implicit uses, making sure that they are at the head of the
     // use order list, so they don't get reallocated.
@@ -767,7 +828,7 @@ void RALocal::AllocateBasicBlock(MachineBasicBlock &MBB) {
     // have in them, then mark them unallocatable.
     // If any virtual regs are earlyclobber, allocate them now (before
     // freeing inputs that are killed).
-    if (MI->getOpcode()==TargetInstrInfo::INLINEASM) {
+    if (MI->isInlineAsm()) {
       for (unsigned i = 0; i != MI->getNumOperands(); ++i) {
         MachineOperand& MO = MI->getOperand(i);
         if (MO.isReg() && MO.isDef() && MO.isEarlyClobber() &&
@@ -783,8 +844,8 @@ void RALocal::AllocateBasicBlock(MachineBasicBlock &MBB) {
             markVirtRegModified(DestVirtReg);
             getVirtRegLastUse(DestVirtReg) =
                    std::make_pair((MachineInstr*)0, 0);
-            DOUT << "  Assigning " << TRI->getName(DestPhysReg)
-                 << " to %reg" << DestVirtReg << "\n";
+            DEBUG(dbgs() << "  Assigning " << TRI->getName(DestPhysReg)
+                         << " to %reg" << DestVirtReg << "\n");
             MO.setReg(DestPhysReg);  // Assign the earlyclobber register
           } else {
             unsigned Reg = MO.getReg();
@@ -812,6 +873,18 @@ void RALocal::AllocateBasicBlock(MachineBasicBlock &MBB) {
       }
     }
 
+    // If a DBG_VALUE says something is located in a spilled register,
+    // change the DBG_VALUE to be undef, which prevents the register
+    // from being reloaded here.  Doing that would change the generated
+    // code, unless another use immediately follows this instruction.
+    if (MI->isDebugValue() &&
+        MI->getNumOperands()==3 && MI->getOperand(0).isReg()) {
+      unsigned VirtReg = MI->getOperand(0).getReg();
+      if (VirtReg && TargetRegisterInfo::isVirtualRegister(VirtReg) &&
+          !getVirt2PhysRegMapSlot(VirtReg))
+        MI->getOperand(0).setReg(0U);
+    }
+
     // Get the used operands into registers.  This has the potential to spill
     // incoming values if we are out of registers.  Note that we completely
     // ignore physical register uses here.  We assume that if an explicit
@@ -824,7 +897,8 @@ void RALocal::AllocateBasicBlock(MachineBasicBlock &MBB) {
       // here we are looking for only used operands (never def&use)
       if (MO.isReg() && !MO.isDef() && MO.getReg() && !MO.isImplicit() &&
           TargetRegisterInfo::isVirtualRegister(MO.getReg()))
-        MI = reloadVirtReg(MBB, MI, i, ReloadedRegs);
+        MI = reloadVirtReg(MBB, MI, i, ReloadedRegs,
+                           isCopy ? DstCopyReg : 0);
     }
 
     // If this instruction is the last user of this register, kill the
@@ -849,15 +923,15 @@ void RALocal::AllocateBasicBlock(MachineBasicBlock &MBB) {
       }
 
       if (PhysReg) {
-        DOUT << "  Last use of " << TRI->getName(PhysReg)
-             << "[%reg" << VirtReg <<"], removing it from live set\n";
+        DEBUG(dbgs() << "  Last use of " << TRI->getName(PhysReg)
+                     << "[%reg" << VirtReg <<"], removing it from live set\n");
         removePhysReg(PhysReg);
         for (const unsigned *SubRegs = TRI->getSubRegisters(PhysReg);
              *SubRegs; ++SubRegs) {
           if (PhysRegsUsed[*SubRegs] != -2) {
-            DOUT  << "  Last use of "
-                  << TRI->getName(*SubRegs)
-                  << "[%reg" << VirtReg <<"], removing it from live set\n";
+            DEBUG(dbgs()  << "  Last use of "
+                          << TRI->getName(*SubRegs) << "[%reg" << VirtReg
+                          <<"], removing it from live set\n");
             removePhysReg(*SubRegs);
           }
         }
@@ -937,13 +1011,35 @@ void RALocal::AllocateBasicBlock(MachineBasicBlock &MBB) {
         unsigned DestPhysReg;
 
         // If DestVirtReg already has a value, use it.
-        if (!(DestPhysReg = getVirt2PhysRegMapSlot(DestVirtReg)))
-          DestPhysReg = getReg(MBB, MI, DestVirtReg);
+        if (!(DestPhysReg = getVirt2PhysRegMapSlot(DestVirtReg))) {
+          // If this is a copy try to reuse the input as the output;
+          // that will make the copy go away.
+          // If this is a copy, the source reg is a phys reg, and
+          // that reg is available, use that phys reg for DestPhysReg.
+          // If this is a copy, the source reg is a virtual reg, and
+          // the phys reg that was assigned to that virtual reg is now
+          // available, use that phys reg for DestPhysReg.  (If it's now
+          // available that means this was the last use of the source.)
+          if (isCopy &&
+              TargetRegisterInfo::isPhysicalRegister(SrcCopyReg) &&
+              isPhysRegAvailable(SrcCopyReg)) {
+            DestPhysReg = SrcCopyReg;
+            assignVirtToPhysReg(DestVirtReg, DestPhysReg);
+          } else if (isCopy &&
+              TargetRegisterInfo::isVirtualRegister(SrcCopyReg) &&
+              SrcCopyPhysReg && isPhysRegAvailable(SrcCopyPhysReg) &&
+              MF->getRegInfo().getRegClass(DestVirtReg)->
+                               contains(SrcCopyPhysReg)) {
+            DestPhysReg = SrcCopyPhysReg;
+            assignVirtToPhysReg(DestVirtReg, DestPhysReg);
+          } else
+            DestPhysReg = getReg(MBB, MI, DestVirtReg);
+        }
         MF->getRegInfo().setPhysRegUsed(DestPhysReg);
         markVirtRegModified(DestVirtReg);
         getVirtRegLastUse(DestVirtReg) = std::make_pair((MachineInstr*)0, 0);
-        DOUT << "  Assigning " << TRI->getName(DestPhysReg)
-             << " to %reg" << DestVirtReg << "\n";
+        DEBUG(dbgs() << "  Assigning " << TRI->getName(DestPhysReg)
+                     << " to %reg" << DestVirtReg << "\n");
         MO.setReg(DestPhysReg);  // Assign the output register
       }
     }
@@ -965,16 +1061,16 @@ void RALocal::AllocateBasicBlock(MachineBasicBlock &MBB) {
       }
 
       if (PhysReg) {
-        DOUT  << "  Register " << TRI->getName(PhysReg)
-              << " [%reg" << VirtReg
-              << "] is never used, removing it from live set\n";
+        DEBUG(dbgs()  << "  Register " << TRI->getName(PhysReg)
+                      << " [%reg" << VirtReg
+                      << "] is never used, removing it from live set\n");
         removePhysReg(PhysReg);
         for (const unsigned *AliasSet = TRI->getAliasSet(PhysReg);
              *AliasSet; ++AliasSet) {
           if (PhysRegsUsed[*AliasSet] != -2) {
-            DOUT  << "  Register " << TRI->getName(*AliasSet)
-                  << " [%reg" << *AliasSet
-                  << "] is never used, removing it from live set\n";
+            DEBUG(dbgs()  << "  Register " << TRI->getName(*AliasSet)
+                          << " [%reg" << *AliasSet
+                          << "] is never used, removing it from live set\n");
             removePhysReg(*AliasSet);
           }
         }
@@ -984,9 +1080,9 @@ void RALocal::AllocateBasicBlock(MachineBasicBlock &MBB) {
     // Finally, if this is a noop copy instruction, zap it.  (Except that if
     // the copy is dead, it must be kept to avoid messing up liveness info for
     // the register scavenger.  See pr4100.)
-    unsigned SrcReg, DstReg, SrcSubReg, DstSubReg;
-    if (TII->isMoveInstr(*MI, SrcReg, DstReg, SrcSubReg, DstSubReg) &&
-        SrcReg == DstReg && DeadDefs.empty())
+    if (TII->isMoveInstr(*MI, SrcCopyReg, DstCopyReg,
+                         SrcCopySubReg, DstCopySubReg) &&
+        SrcCopyReg == DstCopyReg && DeadDefs.empty())
       MBB.erase(MI);
   }
 
@@ -1022,7 +1118,7 @@ void RALocal::AllocateBasicBlock(MachineBasicBlock &MBB) {
 /// runOnMachineFunction - Register allocate the whole function
 ///
 bool RALocal::runOnMachineFunction(MachineFunction &Fn) {
-  DOUT << "Machine Function " << "\n";
+  DEBUG(dbgs() << "Machine Function\n");
   MF = &Fn;
   TM = &Fn.getTarget();
   TRI = TM->getRegisterInfo();

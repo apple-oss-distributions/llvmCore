@@ -18,6 +18,7 @@
 #include "PIC16.h"
 #include "PIC16Subtarget.h"
 #include "llvm/CodeGen/SelectionDAG.h"
+#include "llvm/CodeGen/SelectionDAGISel.h"
 #include "llvm/Target/TargetLowering.h"
 #include <map>
 
@@ -49,9 +50,10 @@ namespace llvm {
       RRF,           // Rotate right through carry
       CALL,          // PIC16 Call instruction 
       CALLW,         // PIC16 CALLW instruction 
-      SUBCC,	     // Compare for equality or inequality.
+      SUBCC,         // Compare for equality or inequality.
       SELECT_ICC,    // Psuedo to be caught in schedular and expanded to brcond.
       BRCOND,        // Conditional branch.
+      RET,           // Return.
       Dummy
     };
 
@@ -61,7 +63,7 @@ namespace llvm {
       ROM_SPACE = 1    // ROM address space number is 1
     };
     enum PIC16Libcall {
-      MUL_I8,
+      MUL_I8 = RTLIB::UNKNOWN_LIBCALL + 1,
       SRA_I8,
       SLL_I8,
       SRL_I8,
@@ -81,39 +83,46 @@ namespace llvm {
     /// DAG node.
     virtual const char *getTargetNodeName(unsigned Opcode) const;
     /// getSetCCResultType - Return the ISD::SETCC ValueType
-    virtual MVT getSetCCResultType(MVT ValType) const;
-    SDValue LowerFORMAL_ARGUMENTS(SDValue Op, SelectionDAG &DAG);
+    virtual MVT::SimpleValueType getSetCCResultType(EVT ValType) const;
+    virtual MVT::SimpleValueType getCmpLibcallReturnType() const;
     SDValue LowerShift(SDValue Op, SelectionDAG &DAG);
+    SDValue LowerMUL(SDValue Op, SelectionDAG &DAG);
     SDValue LowerADD(SDValue Op, SelectionDAG &DAG);
     SDValue LowerSUB(SDValue Op, SelectionDAG &DAG);
     SDValue LowerBinOp(SDValue Op, SelectionDAG &DAG);
-    SDValue LowerCALL(SDValue Op, SelectionDAG &DAG);
-    SDValue LowerRET(SDValue Op, SelectionDAG &DAG);
     // Call returns
     SDValue 
-    LowerDirectCallReturn(SDValue Op, SDValue Chain, SDValue FrameAddress, 
-                          SDValue InFlag, SelectionDAG &DAG);
+    LowerDirectCallReturn(SDValue RetLabel, SDValue Chain, SDValue InFlag,
+                          const SmallVectorImpl<ISD::InputArg> &Ins,
+                          DebugLoc dl, SelectionDAG &DAG,
+                          SmallVectorImpl<SDValue> &InVals);
     SDValue 
-    LowerIndirectCallReturn(SDValue Op, SDValue Chain, SDValue InFlag,
-                            SDValue DataAddr_Lo, SDValue DataAddr_Hi,
-                            SelectionDAG &DAG);
+    LowerIndirectCallReturn(SDValue Chain, SDValue InFlag,
+                             SDValue DataAddr_Lo, SDValue DataAddr_Hi,
+                            const SmallVectorImpl<ISD::InputArg> &Ins,
+                            DebugLoc dl, SelectionDAG &DAG,
+                            SmallVectorImpl<SDValue> &InVals);
 
     // Call arguments
     SDValue 
-    LowerDirectCallArguments(SDValue Op, SDValue Chain, SDValue FrameAddress, 
-                             SDValue InFlag, SelectionDAG &DAG);
+    LowerDirectCallArguments(SDValue ArgLabel, SDValue Chain, SDValue InFlag,
+                             const SmallVectorImpl<ISD::OutputArg> &Outs,
+                             DebugLoc dl, SelectionDAG &DAG);
 
     SDValue 
-    LowerIndirectCallArguments(SDValue Op, SDValue Chain, SDValue InFlag, 
+    LowerIndirectCallArguments(SDValue Chain, SDValue InFlag,
                                SDValue DataAddr_Lo, SDValue DataAddr_Hi, 
-                               SelectionDAG &DAG);
+                               const SmallVectorImpl<ISD::OutputArg> &Outs,
+                               const SmallVectorImpl<ISD::InputArg> &Ins,
+                               DebugLoc dl, SelectionDAG &DAG);
 
     SDValue LowerBR_CC(SDValue Op, SelectionDAG &DAG);
     SDValue LowerSELECT_CC(SDValue Op, SelectionDAG &DAG);
     SDValue getPIC16Cmp(SDValue LHS, SDValue RHS, unsigned OrigCC, SDValue &CC,
                         SelectionDAG &DAG, DebugLoc dl);
     virtual MachineBasicBlock *EmitInstrWithCustomInserter(MachineInstr *MI,
-                                                  MachineBasicBlock *MBB) const;
+                                                         MachineBasicBlock *MBB,
+                    DenseMap<MachineBasicBlock*, MachineBasicBlock*> *EM) const;
 
 
     virtual SDValue LowerOperation(SDValue Op, SelectionDAG &DAG);
@@ -123,6 +132,28 @@ namespace llvm {
     virtual void LowerOperationWrapper(SDNode *N,
                                        SmallVectorImpl<SDValue> &Results,
                                        SelectionDAG &DAG);
+
+    virtual SDValue
+    LowerFormalArguments(SDValue Chain,
+                         CallingConv::ID CallConv,
+                         bool isVarArg,
+                         const SmallVectorImpl<ISD::InputArg> &Ins,
+                         DebugLoc dl, SelectionDAG &DAG,
+                         SmallVectorImpl<SDValue> &InVals);
+
+    virtual SDValue
+      LowerCall(SDValue Chain, SDValue Callee,
+                CallingConv::ID CallConv, bool isVarArg, bool &isTailCall,
+                const SmallVectorImpl<ISD::OutputArg> &Outs,
+                const SmallVectorImpl<ISD::InputArg> &Ins,
+                DebugLoc dl, SelectionDAG &DAG,
+                SmallVectorImpl<SDValue> &InVals);
+
+    virtual SDValue
+      LowerReturn(SDValue Chain,
+                  CallingConv::ID CallConv, bool isVarArg,
+                  const SmallVectorImpl<ISD::OutputArg> &Outs,
+                  DebugLoc dl, SelectionDAG &DAG);
 
     SDValue ExpandStore(SDNode *N, SelectionDAG &DAG);
     SDValue ExpandLoad(SDNode *N, SelectionDAG &DAG);
@@ -145,6 +176,11 @@ namespace llvm {
     unsigned GetTmpSize() { return TmpSize; }
     void SetTmpSize(unsigned Size) { TmpSize = Size; }
 
+    /// getFunctionAlignment - Return the Log2 alignment of this function.
+    virtual unsigned getFunctionAlignment(const Function *) const {
+      // FIXME: The function never seems to be aligned.
+      return 1;
+    }
   private:
     // If the Node is a BUILD_PAIR representing a direct Address,
     // then this function will return true.
@@ -169,12 +205,6 @@ namespace llvm {
     void LegalizeFrameIndex(SDValue Op, SelectionDAG &DAG, SDValue &ES, 
                             int &Offset);
 
-
-    // CALL node should have all legal operands only. Legalize all non-legal
-    // operands of CALL node and then return the new call will all operands
-    // legal.
-    SDValue LegalizeCALL(SDValue Op, SelectionDAG &DAG);
-
     // For indirect calls data address of the callee frame need to be
     // extracted. This function fills the arguments DataAddr_Lo and 
     // DataAddr_Hi with the address of the callee frame.
@@ -188,7 +218,9 @@ namespace llvm {
 
     // This function checks if we need to put an operand of an operation on
     // stack and generate a load or not.
-    bool NeedToConvertToMemOp(SDValue Op, unsigned &MemOp); 
+    // DAG parameter is required to access DAG information during
+    // analysis.
+    bool NeedToConvertToMemOp(SDValue Op, unsigned &MemOp, SelectionDAG &DAG); 
 
     /// Subtarget - Keep a pointer to the PIC16Subtarget around so that we can
     /// make the right decision when generating code for different targets.
@@ -204,12 +236,17 @@ namespace llvm {
     const char *getPIC16LibcallName(PIC16ISD::PIC16Libcall Call);
 
     // Make PIC16 Libcall.
-    SDValue MakePIC16Libcall(PIC16ISD::PIC16Libcall Call, MVT RetVT, 
+    SDValue MakePIC16Libcall(PIC16ISD::PIC16Libcall Call, EVT RetVT, 
                              const SDValue *Ops, unsigned NumOps, bool isSigned,
                              SelectionDAG &DAG, DebugLoc dl);
 
     // Check if operation has a direct load operand.
     inline bool isDirectLoad(const SDValue Op);
+
+  public:
+    // Keep a pointer to SelectionDAGISel to access its public 
+    // interface (It is required during legalization)
+    SelectionDAGISel   *ISel;
 
   private:
     // The frameindexes generated for spill/reload are stack based.

@@ -71,7 +71,8 @@ private:
 class FunctionPassManager : public PassManagerBase {
 public:
   /// FunctionPassManager ctor - This initializes the pass manager.  It needs,
-  /// but does not take ownership of, the specified module provider.
+  /// but does not take ownership of, the specified Module.
+  explicit FunctionPassManager(Module *M);
   explicit FunctionPassManager(ModuleProvider *P);
   ~FunctionPassManager();
  
@@ -96,15 +97,9 @@ public:
   ///
   bool doFinalization();
   
-  /// getModuleProvider - Return the module provider that this passmanager is
-  /// currently using.  This is the module provider that it uses when a function
-  /// is optimized that is non-resident in the module.
-  ModuleProvider *getModuleProvider() const { return MP; }
-  void setModuleProvider(ModuleProvider *NewMP) { MP = NewMP; }
-
 private:
   FunctionPassManagerImpl *FPM;
-  ModuleProvider *MP;
+  Module *M;
 };
 
 } // End llvm namespace

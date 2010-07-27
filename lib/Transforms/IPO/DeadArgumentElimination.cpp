@@ -24,14 +24,15 @@
 #include "llvm/DerivedTypes.h"
 #include "llvm/Instructions.h"
 #include "llvm/IntrinsicInst.h"
+#include "llvm/LLVMContext.h"
 #include "llvm/Module.h"
 #include "llvm/Pass.h"
 #include "llvm/Support/CallSite.h"
 #include "llvm/Support/Debug.h"
+#include "llvm/Support/raw_ostream.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/ADT/StringExtras.h"
-#include "llvm/Support/Compiler.h"
 #include <map>
 #include <set>
 using namespace llvm;
@@ -42,7 +43,7 @@ STATISTIC(NumRetValsEliminated  , "Number of unused return values removed");
 namespace {
   /// DAE - The dead argument elimination pass.
   ///
-  class VISIBILITY_HIDDEN DAE : public ModulePass {
+  class DAE : public ModulePass {
   public:
 
     /// Struct that represents (part of) either a return value or a function
@@ -72,7 +73,7 @@ namespace {
 
       std::string getDescription() const {
         return std::string((IsArg ? "Argument #" : "Return value #")) 
-               + utostr(Idx) + " of function " + F->getName();
+               + utostr(Idx) + " of function " + F->getNameStr();
       }
     };
 
@@ -175,15 +176,8 @@ bool DAE::DeleteDeadVarargs(Function &Fn) {
   if (Fn.isDeclaration() || !Fn.hasLocalLinkage()) return false;
 
   // Ensure that the function is only directly called.
-  for (Value::use_iterator I = Fn.use_begin(), E = Fn.use_end(); I != E; ++I) {
-    // If this use is anything other than a call site, give up.
-    CallSite CS = CallSite::get(*I);
-    Instruction *TheCall = CS.getInstruction();
-    if (!TheCall) return false;   // Not a direct call site?
-
-    // The addr of this function is passed to the call.
-    if (!CS.isCallee(I)) return false;
-  }
+  if (Fn.hasAddressTaken())
+    return false;
 
   // Okay, we know we can transform this function if safe.  Scan its body
   // looking for calls to llvm.vastart.
@@ -202,8 +196,10 @@ bool DAE::DeleteDeadVarargs(Function &Fn) {
   // Start by computing a new prototype for the function, which is the same as
   // the old function, but doesn't have isVarArg set.
   const FunctionType *FTy = Fn.getFunctionType();
+  
   std::vector<const Type*> Params(FTy->param_begin(), FTy->param_end());
-  FunctionType *NFTy = FunctionType::get(FTy->getReturnType(), Params, false);
+  FunctionType *NFTy = FunctionType::get(FTy->getReturnType(),
+                                                Params, false);
   unsigned NumArgs = Params.size();
 
   // Create the new function body and insert it into the module...
@@ -284,7 +280,7 @@ bool DAE::DeleteDeadVarargs(Function &Fn) {
 /// for void functions and 1 for functions not returning a struct. It returns
 /// the number of struct elements for functions returning a struct.
 static unsigned NumRetVals(const Function *F) {
-  if (F->getReturnType() == Type::VoidTy)
+  if (F->getReturnType() == Type::getVoidTy(F->getContext()))
     return 0;
   else if (const StructType *STy = dyn_cast<StructType>(F->getReturnType()))
     return STy->getNumElements();
@@ -429,7 +425,7 @@ void DAE::SurveyFunction(Function &F) {
     return;
   }
 
-  DOUT << "DAE - Inspecting callers for fn: " << F.getName() << "\n";
+  DEBUG(dbgs() << "DAE - Inspecting callers for fn: " << F.getName() << "\n");
   // Keep track of the number of live retvals, so we can skip checks once all
   // of them turn out to be live.
   unsigned NumLiveRetVals = 0;
@@ -492,7 +488,7 @@ void DAE::SurveyFunction(Function &F) {
   for (unsigned i = 0; i != RetCount; ++i)
     MarkValue(CreateRet(&F, i), RetValLiveness[i], MaybeLiveRetUses[i]);
 
-  DOUT << "DAE - Inspecting args for fn: " << F.getName() << "\n";
+  DEBUG(dbgs() << "DAE - Inspecting args for fn: " << F.getName() << "\n");
 
   // Now, check all of our arguments.
   unsigned i = 0;
@@ -534,7 +530,7 @@ void DAE::MarkValue(const RetOrArg &RA, Liveness L,
 /// mark any values that are used as this function's parameters or by its return
 /// values (according to Uses) live as well.
 void DAE::MarkLive(const Function &F) {
-    DOUT << "DAE - Intrinsically live fn: " << F.getName() << "\n";
+  DEBUG(dbgs() << "DAE - Intrinsically live fn: " << F.getName() << "\n");
     // Mark the function as live.
     LiveFunctions.insert(&F);
     // Mark all arguments as live.
@@ -555,7 +551,7 @@ void DAE::MarkLive(const RetOrArg &RA) {
   if (!LiveValues.insert(RA).second)
     return; // We were already marked Live.
 
-  DOUT << "DAE - Marking " << RA.getDescription() << " live\n";
+  DEBUG(dbgs() << "DAE - Marking " << RA.getDescription() << " live\n");
   PropagateLiveness(RA);
 }
 
@@ -603,11 +599,12 @@ bool DAE::RemoveDeadStuffFromFunction(Function *F) {
   const Type *RetTy = FTy->getReturnType();
   const Type *NRetTy = NULL;
   unsigned RetCount = NumRetVals(F);
+  
   // -1 means unused, other numbers are the new index
   SmallVector<int, 5> NewRetIdxs(RetCount, -1);
   std::vector<const Type*> RetTypes;
-  if (RetTy == Type::VoidTy) {
-    NRetTy = Type::VoidTy;
+  if (RetTy == Type::getVoidTy(F->getContext())) {
+    NRetTy = Type::getVoidTy(F->getContext());
   } else {
     const StructType *STy = dyn_cast<StructType>(RetTy);
     if (STy)
@@ -619,8 +616,8 @@ bool DAE::RemoveDeadStuffFromFunction(Function *F) {
           NewRetIdxs[i] = RetTypes.size() - 1;
         } else {
           ++NumRetValsEliminated;
-          DOUT << "DAE - Removing return value " << i << " from "
-               << F->getNameStart() << "\n";
+          DEBUG(dbgs() << "DAE - Removing return value " << i << " from "
+                << F->getName() << "\n");
         }
       }
     else
@@ -629,8 +626,8 @@ bool DAE::RemoveDeadStuffFromFunction(Function *F) {
         RetTypes.push_back(RetTy);
         NewRetIdxs[0] = 0;
       } else {
-        DOUT << "DAE - Removing return value from " << F->getNameStart()
-             << "\n";
+        DEBUG(dbgs() << "DAE - Removing return value from " << F->getName()
+              << "\n");
         ++NumRetValsEliminated;
       }
     if (RetTypes.size() > 1)
@@ -640,14 +637,14 @@ bool DAE::RemoveDeadStuffFromFunction(Function *F) {
       // something and {} into void.
       // Make the new struct packed if we used to return a packed struct
       // already.
-      NRetTy = StructType::get(RetTypes, STy->isPacked());
+      NRetTy = StructType::get(STy->getContext(), RetTypes, STy->isPacked());
     else if (RetTypes.size() == 1)
       // One return type? Just a simple value then, but only if we didn't use to
       // return a struct with that simple value before.
       NRetTy = RetTypes.front();
     else if (RetTypes.size() == 0)
       // No return types? Make it void, but only if we didn't use to return {}.
-      NRetTy = Type::VoidTy;
+      NRetTy = Type::getVoidTy(F->getContext());
   }
 
   assert(NRetTy && "No new return type found?");
@@ -656,7 +653,7 @@ bool DAE::RemoveDeadStuffFromFunction(Function *F) {
   // values. Otherwise, ensure that we don't have any conflicting attributes
   // here. Currently, this should not be possible, but special handling might be
   // required when new return value attributes are added.
-  if (NRetTy == Type::VoidTy)
+  if (NRetTy == Type::getVoidTy(F->getContext()))
     RAttrs &= ~Attribute::typeIncompatible(NRetTy);
   else
     assert((RAttrs & Attribute::typeIncompatible(NRetTy)) == 0 
@@ -684,8 +681,8 @@ bool DAE::RemoveDeadStuffFromFunction(Function *F) {
         AttributesVec.push_back(AttributeWithIndex::get(Params.size(), Attrs));
     } else {
       ++NumArgumentsEliminated;
-      DOUT << "DAE - Removing argument " << i << " (" << I->getNameStart()
-           << ") from " << F->getNameStart() << "\n";
+      DEBUG(dbgs() << "DAE - Removing argument " << i << " (" << I->getName()
+            << ") from " << F->getName() << "\n");
     }
   }
 
@@ -704,11 +701,12 @@ bool DAE::RemoveDeadStuffFromFunction(Function *F) {
   bool ExtraArgHack = false;
   if (Params.empty() && FTy->isVarArg() && FTy->getNumParams() != 0) {
     ExtraArgHack = true;
-    Params.push_back(Type::Int32Ty);
+    Params.push_back(Type::getInt32Ty(F->getContext()));
   }
 
   // Create the new function type based on the recomputed parameters.
-  FunctionType *NFTy = FunctionType::get(NRetTy, Params, FTy->isVarArg());
+  FunctionType *NFTy = FunctionType::get(NRetTy, Params,
+                                                FTy->isVarArg());
 
   // No change?
   if (NFTy == FTy)
@@ -757,7 +755,7 @@ bool DAE::RemoveDeadStuffFromFunction(Function *F) {
       }
 
     if (ExtraArgHack)
-      Args.push_back(UndefValue::get(Type::Int32Ty));
+      Args.push_back(UndefValue::get(Type::getInt32Ty(F->getContext())));
 
     // Push any varargs arguments on the list. Don't forget their attributes.
     for (CallSite::arg_iterator E = CS.arg_end(); I != E; ++I, ++i) {
@@ -793,12 +791,12 @@ bool DAE::RemoveDeadStuffFromFunction(Function *F) {
         // Return type not changed? Just replace users then.
         Call->replaceAllUsesWith(New);
         New->takeName(Call);
-      } else if (New->getType() == Type::VoidTy) {
+      } else if (New->getType() == Type::getVoidTy(F->getContext())) {
         // Our return value has uses, but they will get removed later on.
         // Replace by null for now.
         Call->replaceAllUsesWith(Constant::getNullValue(Call->getType()));
       } else {
-        assert(isa<StructType>(RetTy) &&
+        assert(RetTy->isStructTy() &&
                "Return type changed, but not into a void. The old return type"
                " must have been a struct!");
         Instruction *InsertPt = Call;
@@ -813,7 +811,7 @@ bool DAE::RemoveDeadStuffFromFunction(Function *F) {
         // extract/insertvalue chaining and let instcombine clean that up.
         //
         // Start out building up our return value from undef
-        Value *RetVal = llvm::UndefValue::get(RetTy);
+        Value *RetVal = UndefValue::get(RetTy);
         for (unsigned i = 0; i != RetCount; ++i)
           if (NewRetIdxs[i] != -1) {
             Value *V;
@@ -869,10 +867,10 @@ bool DAE::RemoveDeadStuffFromFunction(Function *F) {
       if (ReturnInst *RI = dyn_cast<ReturnInst>(BB->getTerminator())) {
         Value *RetVal;
 
-        if (NFTy->getReturnType() == Type::VoidTy) {
+        if (NFTy->getReturnType() == Type::getVoidTy(F->getContext())) {
           RetVal = 0;
         } else {
-          assert (isa<StructType>(RetTy));
+          assert (RetTy->isStructTy());
           // The original return value was a struct, insert
           // extractvalue/insertvalue chains to extract only the values we need
           // to return and insert them into our new result.
@@ -880,7 +878,7 @@ bool DAE::RemoveDeadStuffFromFunction(Function *F) {
           // clean that up.
           Value *OldRet = RI->getOperand(0);
           // Start out building up our return value from undef
-          RetVal = llvm::UndefValue::get(NRetTy);
+          RetVal = UndefValue::get(NRetTy);
           for (unsigned i = 0; i != RetCount; ++i)
             if (NewRetIdxs[i] != -1) {
               ExtractValueInst *EV = ExtractValueInst::Create(OldRet, i,
@@ -900,7 +898,7 @@ bool DAE::RemoveDeadStuffFromFunction(Function *F) {
         }
         // Replace the return instruction with one returning the new return
         // value (possibly 0 if we became void).
-        ReturnInst::Create(RetVal, RI);
+        ReturnInst::Create(F->getContext(), RetVal, RI);
         BB->getInstList().erase(RI);
       }
 
@@ -917,7 +915,7 @@ bool DAE::runOnModule(Module &M) {
   // removed.  We can do this if they never call va_start.  This loop cannot be
   // fused with the next loop, because deleting a function invalidates
   // information computed while surveying other functions.
-  DOUT << "DAE - Deleting dead varargs\n";
+  DEBUG(dbgs() << "DAE - Deleting dead varargs\n");
   for (Module::iterator I = M.begin(), E = M.end(); I != E; ) {
     Function &F = *I++;
     if (F.getFunctionType()->isVarArg())
@@ -928,7 +926,7 @@ bool DAE::runOnModule(Module &M) {
   // We assume all arguments are dead unless proven otherwise (allowing us to
   // determine that dead arguments passed into recursive functions are dead).
   //
-  DOUT << "DAE - Determining liveness\n";
+  DEBUG(dbgs() << "DAE - Determining liveness\n");
   for (Module::iterator I = M.begin(), E = M.end(); I != E; ++I)
     SurveyFunction(*I);
   

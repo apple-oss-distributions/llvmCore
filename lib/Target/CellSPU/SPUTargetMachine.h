@@ -35,12 +35,9 @@ class SPUTargetMachine : public LLVMTargetMachine {
   SPUFrameInfo        FrameInfo;
   SPUTargetLowering   TLInfo;
   InstrItineraryData  InstrItins;
-  
-protected:
-  virtual const TargetAsmInfo *createTargetAsmInfo() const;
-  
 public:
-  SPUTargetMachine(const Module &M, const std::string &FS);
+  SPUTargetMachine(const Target &T, const std::string &TT,
+                   const std::string &FS);
 
   /// Return the subtarget implementation object
   virtual const SPUSubtarget     *getSubtargetImpl() const {
@@ -59,12 +56,6 @@ public:
   virtual       TargetJITInfo    *getJITInfo() {
     return NULL;
   }
-  
-  //! Module match function
-  /*!
-    Module matching function called by TargetMachineRegistry().
-   */
-  static unsigned getModuleMatchQuality(const Module &M);
 
   virtual       SPUTargetLowering *getTargetLowering() const { 
    return const_cast<SPUTargetLowering*>(&TLInfo); 
@@ -78,16 +69,13 @@ public:
     return &DataLayout;
   }
 
-  virtual const InstrItineraryData getInstrItineraryData() const {  
+  virtual const InstrItineraryData getInstrItineraryData() const {
     return InstrItins;
   }
   
   // Pass Pipeline Configuration
   virtual bool addInstSelector(PassManagerBase &PM,
                                CodeGenOpt::Level OptLevel);
-  virtual bool addAssemblyEmitter(PassManagerBase &PM,
-                                  CodeGenOpt::Level OptLevel,
-                                  bool Verbose, raw_ostream &Out);
 };
 
 } // end namespace llvm

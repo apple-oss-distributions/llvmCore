@@ -23,20 +23,15 @@
 
 namespace llvm {
 
-class Module;
-
 class SparcTargetMachine : public LLVMTargetMachine {
-  const TargetData DataLayout;       // Calculates type size & alignment
   SparcSubtarget Subtarget;
+  const TargetData DataLayout;       // Calculates type size & alignment
   SparcTargetLowering TLInfo;
   SparcInstrInfo InstrInfo;
   TargetFrameInfo FrameInfo;
-  
-protected:
-  virtual const TargetAsmInfo *createTargetAsmInfo() const;
-  
 public:
-  SparcTargetMachine(const Module &M, const std::string &FS);
+  SparcTargetMachine(const Target &T, const std::string &TT,
+                     const std::string &FS, bool is64bit);
 
   virtual const SparcInstrInfo *getInstrInfo() const { return &InstrInfo; }
   virtual const TargetFrameInfo  *getFrameInfo() const { return &FrameInfo; }
@@ -48,14 +43,26 @@ public:
     return const_cast<SparcTargetLowering*>(&TLInfo);
   }
   virtual const TargetData       *getTargetData() const { return &DataLayout; }
-  static unsigned getModuleMatchQuality(const Module &M);
 
   // Pass Pipeline Configuration
   virtual bool addInstSelector(PassManagerBase &PM, CodeGenOpt::Level OptLevel);
   virtual bool addPreEmitPass(PassManagerBase &PM, CodeGenOpt::Level OptLevel);
-  virtual bool addAssemblyEmitter(PassManagerBase &PM,
-                                  CodeGenOpt::Level OptLevel,
-                                  bool Verbose, raw_ostream &Out);
+};
+
+/// SparcV8TargetMachine - Sparc 32-bit target machine
+///
+class SparcV8TargetMachine : public SparcTargetMachine {
+public:
+  SparcV8TargetMachine(const Target &T, const std::string &TT,
+                       const std::string &FS);
+};
+
+/// SparcV9TargetMachine - Sparc 64-bit target machine
+///
+class SparcV9TargetMachine : public SparcTargetMachine {
+public:
+  SparcV9TargetMachine(const Target &T, const std::string &TT,
+                       const std::string &FS);
 };
 
 } // end namespace llvm

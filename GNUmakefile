@@ -35,10 +35,8 @@ DSTROOT = $(OBJROOT)/../dst
 PREFIX = /usr/local
 
 # Unless assertions are forced on in the GMAKE command line, disable them.
-ifdef ENABLE_ASSERTIONS
-LLVM_ASSERTIONS := yes
-else
-LLVM_ASSERTIONS := no
+ifndef ENABLE_ASSERTIONS
+ENABLE_ASSERTIONS := no
 endif
 
 # Default is optimized build.
@@ -47,6 +45,9 @@ LLVM_OPTIMIZED := no
 else
 LLVM_OPTIMIZED := yes
 endif
+
+# Default to not install libLTO.dylib.
+INSTALL_LIBLTO := no
 
 ifndef RC_ProjectSourceVersion
 RC_ProjectSourceVersion = 9999
@@ -59,9 +60,9 @@ endif
 # NOTE : Always put version numbers at the end because they are optional.
 install: $(OBJROOT) $(SYMROOT) $(DSTROOT)
 	cd $(OBJROOT) && \
-	  $(SRC)/build_llvm "$(RC_ARCHS)" "$(TARGETS)" \
+	  $(SRC)/utils/buildit/build_llvm "$(RC_ARCHS)" "$(TARGETS)" \
 	    $(SRC) $(PREFIX) $(DSTROOT) $(SYMROOT) \
-	    $(LLVM_ASSERTIONS) $(LLVM_OPTIMIZED) \
+	    $(ENABLE_ASSERTIONS) $(LLVM_OPTIMIZED) $(INSTALL_LIBLTO) \
 	    $(RC_ProjectSourceVersion) $(RC_ProjectSourceSubversion) 
 
 
@@ -85,6 +86,7 @@ installsrc:
 	                        -type f -a -name .DS_Store -o \
 				-name \*~ -o -name .\#\* \) \
 	  -exec rm -rf {} \;
+	rm -rf "$(SRCROOT)/test"
 
 #######################################################################
 

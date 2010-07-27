@@ -20,7 +20,7 @@ using namespace llvm;
 ModuleProvider::ModuleProvider() : TheModule(0) { }
 
 /// dtor - when we leave, we take our Module with us
-///
+/// NOTE: Not in this version. ModuleProvider is here to provide JIT backward
+/// compatibility. ExecutionEngine is manually deleting the modules.
 ModuleProvider::~ModuleProvider() {
-  delete TheModule;
 }

@@ -14,6 +14,7 @@
 
 #include "Unix.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/System/Mutex.h"
 #include <vector>
 #include <algorithm>
 #if HAVE_EXECINFO_H
@@ -33,6 +34,8 @@ using namespace llvm;
 
 static RETSIGTYPE SignalHandler(int Sig);  // defined below.
 
+static SmartMutex<true> SignalsMutex;
+
 /// InterruptFunction - The function to call if ctrl-c is pressed.
 static void (*InterruptFunction)() = 0;
 
@@ -49,7 +52,16 @@ static const int *const IntSigsEnd =
 // KillSigs - Signals that are synchronous with the program that will cause it
 // to die.
 static const int KillSigs[] = {
-  SIGILL, SIGTRAP, SIGABRT, SIGFPE, SIGBUS, SIGSEGV, SIGSYS, SIGXCPU, SIGXFSZ
+  SIGILL, SIGTRAP, SIGABRT, SIGFPE, SIGBUS, SIGSEGV
+#ifdef SIGSYS
+  , SIGSYS
+#endif
+#ifdef SIGXCPU
+  , SIGXCPU
+#endif
+#ifdef SIGXFSZ
+  , SIGXFSZ
+#endif
 #ifdef SIGEMT
   , SIGEMT
 #endif
@@ -113,6 +125,7 @@ static RETSIGTYPE SignalHandler(int Sig) {
   sigfillset(&SigMask);
   sigprocmask(SIG_UNBLOCK, &SigMask, 0);
 
+  SignalsMutex.acquire();
   if (FilesToRemove != 0)
     while (!FilesToRemove->empty()) {
       FilesToRemove->back().eraseFromDisk(true);
@@ -122,13 +135,18 @@ static RETSIGTYPE SignalHandler(int Sig) {
   if (std::find(IntSigs, IntSigsEnd, Sig) != IntSigsEnd) {
     if (InterruptFunction) {
       void (*IF)() = InterruptFunction;
+      SignalsMutex.release();
       InterruptFunction = 0;
       IF();        // run the interrupt function.
       return;
     }
+    
+    SignalsMutex.release();
     raise(Sig);   // Execute the default handler.
     return;
   }
+
+  SignalsMutex.release();
 
   // Otherwise if it is a fault (like SEGV) run any handler.
   if (CallBacksToRun)
@@ -139,17 +157,22 @@ static RETSIGTYPE SignalHandler(int Sig) {
 
 
 void llvm::sys::SetInterruptFunction(void (*IF)()) {
+  SignalsMutex.acquire();
   InterruptFunction = IF;
+  SignalsMutex.release();
   RegisterHandlers();
 }
 
 // RemoveFileOnSignal - The public API
 bool llvm::sys::RemoveFileOnSignal(const sys::Path &Filename,
                                    std::string* ErrMsg) {
+  SignalsMutex.acquire();
   if (FilesToRemove == 0)
     FilesToRemove = new std::vector<sys::Path>();
 
   FilesToRemove->push_back(Filename);
+
+  SignalsMutex.release();
 
   RegisterHandlers();
   return false;
@@ -195,7 +218,7 @@ static void PrintStackTrace(void *) {
     Dl_info dlinfo;
     dladdr(StackTrace[i], &dlinfo);
 
-    fprintf(stderr, "%-3d", i);
+    fprintf(stderr, "%-2d", i);
 
     const char* name = strrchr(dlinfo.dli_fname, '/');
     if (name == NULL) fprintf(stderr, " %-*s", width, dlinfo.dli_fname);

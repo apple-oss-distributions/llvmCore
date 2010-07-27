@@ -33,12 +33,10 @@ class AlphaTargetMachine : public LLVMTargetMachine {
   AlphaJITInfo JITInfo;
   AlphaSubtarget Subtarget;
   AlphaTargetLowering TLInfo;
-  
-protected:
-  virtual const TargetAsmInfo *createTargetAsmInfo() const;
-  
+
 public:
-  AlphaTargetMachine(const Module &M, const std::string &FS);
+  AlphaTargetMachine(const Target &T, const std::string &TT,
+                     const std::string &FS);
 
   virtual const AlphaInstrInfo *getInstrInfo() const { return &InstrInfo; }
   virtual const TargetFrameInfo  *getFrameInfo() const { return &FrameInfo; }
@@ -46,7 +44,7 @@ public:
   virtual const AlphaRegisterInfo *getRegisterInfo() const {
     return &InstrInfo.getRegisterInfo();
   }
-  virtual AlphaTargetLowering* getTargetLowering() const { 
+  virtual AlphaTargetLowering* getTargetLowering() const {
     return const_cast<AlphaTargetLowering*>(&TLInfo);
   }
   virtual const TargetData       *getTargetData() const { return &DataLayout; }
@@ -54,21 +52,11 @@ public:
     return &JITInfo;
   }
 
-  static unsigned getJITMatchQuality();
-  static unsigned getModuleMatchQuality(const Module &M);
-  
   // Pass Pipeline Configuration
   virtual bool addInstSelector(PassManagerBase &PM, CodeGenOpt::Level OptLevel);
   virtual bool addPreEmitPass(PassManagerBase &PM, CodeGenOpt::Level OptLevel);
-  virtual bool addAssemblyEmitter(PassManagerBase &PM,
-                                  CodeGenOpt::Level OptLevel,
-                                  bool Verbose, raw_ostream &Out);
   virtual bool addCodeEmitter(PassManagerBase &PM, CodeGenOpt::Level OptLevel,
-                              bool DumpAsm, MachineCodeEmitter &MCE);
-  virtual bool addSimpleCodeEmitter(PassManagerBase &PM,
-                                    CodeGenOpt::Level OptLevel,
-                                    bool DumpAsm,
-                                    MachineCodeEmitter &MCE);
+                              JITCodeEmitter &JCE);
 };
 
 } // end namespace llvm

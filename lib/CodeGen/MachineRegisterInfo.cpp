@@ -16,6 +16,7 @@ using namespace llvm;
 
 MachineRegisterInfo::MachineRegisterInfo(const TargetRegisterInfo &TRI) {
   VRegInfo.reserve(256);
+  RegAllocHints.reserve(256);
   RegClass2VRegMap.resize(TRI.getNumRegClasses()+1); // RC ID starts at 1.
   UsedPhysRegs.resize(TRI.getNumRegs());
   
@@ -64,6 +65,7 @@ MachineRegisterInfo::createVirtualRegister(const TargetRegisterClass *RegClass){
   // Add a reg, but keep track of whether the vector reallocated or not.
   void *ArrayBase = VRegInfo.empty() ? 0 : &VRegInfo[0];
   VRegInfo.push_back(std::make_pair(RegClass, (MachineOperand*)0));
+  RegAllocHints.push_back(std::make_pair(0, 0));
 
   if (!((&VRegInfo[0] == ArrayBase || VRegInfo.size() == 1)))
     // The vector reallocated, handle this now.
@@ -108,14 +110,25 @@ void MachineRegisterInfo::replaceRegWith(unsigned FromReg, unsigned ToReg) {
 MachineInstr *MachineRegisterInfo::getVRegDef(unsigned Reg) const {
   assert(Reg-TargetRegisterInfo::FirstVirtualRegister < VRegInfo.size() &&
          "Invalid vreg!");
-  for (reg_iterator I = reg_begin(Reg), E = reg_end(); I != E; ++I) {
-    // Since we are in SSA form, we can stop at the first definition.
-    if (I.getOperand().isDef())
-      return &*I;
-  }
+  // Since we are in SSA form, we can use the first definition.
+  if (!def_empty(Reg))
+    return &*def_begin(Reg);
   return 0;
 }
 
+bool MachineRegisterInfo::hasOneUse(unsigned RegNo) const {
+  use_iterator UI = use_begin(RegNo);
+  if (UI == use_end())
+    return false;
+  return ++UI == use_end();
+}
+
+bool MachineRegisterInfo::hasOneNonDBGUse(unsigned RegNo) const {
+  use_nodbg_iterator UI = use_nodbg_begin(RegNo);
+  if (UI == use_nodbg_end())
+    return false;
+  return ++UI == use_nodbg_end();
+}
 
 #ifndef NDEBUG
 void MachineRegisterInfo::dumpUses(unsigned Reg) const {

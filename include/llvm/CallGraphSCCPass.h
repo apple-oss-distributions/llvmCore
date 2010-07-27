@@ -22,6 +22,7 @@
 #define LLVM_CALL_GRAPH_SCC_PASS_H
 
 #include "llvm/Pass.h"
+#include "llvm/Analysis/CallGraph.h"
 
 namespace llvm {
 
@@ -31,8 +32,8 @@ class PMStack;
 
 struct CallGraphSCCPass : public Pass {
 
-  explicit CallGraphSCCPass(intptr_t pid) : Pass(pid) {}
-  explicit CallGraphSCCPass(void *pid) : Pass(pid) {}
+  explicit CallGraphSCCPass(intptr_t pid) : Pass(PT_CallGraphSCC, pid) {}
+  explicit CallGraphSCCPass(void *pid) : Pass(PT_CallGraphSCC, pid) {}
 
   /// doInitialization - This method is called before the SCC's of the program
   /// has been processed, allowing the pass to do initialization as necessary.
@@ -45,7 +46,10 @@ struct CallGraphSCCPass : public Pass {
   /// non-recursive (or only self-recursive) functions will have an SCC size of
   /// 1, where recursive portions of the call graph will have SCC size > 1.
   ///
-  virtual bool runOnSCC(const std::vector<CallGraphNode *> &SCC) = 0;
+  /// SCC passes that add or delete functions to the SCC are required to update
+  /// the SCC list, otherwise stale pointers may be dereferenced.
+  ///
+  virtual bool runOnSCC(std::vector<CallGraphNode *> &SCC) = 0;
 
   /// doFinalization - This method is called after the SCC's of the program has
   /// been processed, allowing the pass to do final cleanup as necessary.

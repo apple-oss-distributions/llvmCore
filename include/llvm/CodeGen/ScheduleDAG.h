@@ -23,6 +23,7 @@
 #include "llvm/ADT/PointerIntPair.h"
 
 namespace llvm {
+  class AliasAnalysis;
   class SUnit;
   class MachineConstantPool;
   class MachineFunction;
@@ -145,6 +146,11 @@ namespace llvm {
       return Latency;
     }
 
+    /// setLatency - Set the latency for this edge.
+    void setLatency(unsigned Lat) {
+      Latency = Lat;
+    }
+
     //// getSUnit - Return the SUnit to which this edge points.
     SUnit *getSUnit() const {
       return Dep.getPointer();
@@ -221,6 +227,7 @@ namespace llvm {
   private:
     SDNode *Node;                       // Representative node.
     MachineInstr *Instr;                // Alternatively, a MachineInstr.
+    MachineInstr *DbgInstr;             // A dbg_value referencing this.
   public:
     SUnit *OrigNode;                    // If not this, the node from which
                                         // this node was cloned.
@@ -238,10 +245,10 @@ namespace llvm {
     unsigned NodeNum;                   // Entry # of node in the node vector.
     unsigned NodeQueueId;               // Queue id of node.
     unsigned short Latency;             // Node latency.
-    short NumPreds;                     // # of SDep::Data preds.
-    short NumSuccs;                     // # of SDep::Data sucss.
-    short NumPredsLeft;                 // # of preds not scheduled.
-    short NumSuccsLeft;                 // # of succs not scheduled.
+    unsigned NumPreds;                  // # of SDep::Data preds.
+    unsigned NumSuccs;                  // # of SDep::Data sucss.
+    unsigned NumPredsLeft;              // # of preds not scheduled.
+    unsigned NumSuccsLeft;              // # of succs not scheduled.
     bool isTwoAddress     : 1;          // Is a two-address instruction.
     bool isCommutable     : 1;          // Is a commutable instruction.
     bool hasPhysRegDefs   : 1;          // Has physreg defs that are being used.
@@ -263,10 +270,10 @@ namespace llvm {
     /// SUnit - Construct an SUnit for pre-regalloc scheduling to represent
     /// an SDNode and any nodes flagged to it.
     SUnit(SDNode *node, unsigned nodenum)
-      : Node(node), Instr(0), OrigNode(0), NodeNum(nodenum), NodeQueueId(0),
-        Latency(0), NumPreds(0), NumSuccs(0), NumPredsLeft(0), NumSuccsLeft(0),
-        isTwoAddress(false), isCommutable(false), hasPhysRegDefs(false),
-        hasPhysRegClobbers(false),
+      : Node(node), Instr(0), DbgInstr(0), OrigNode(0), NodeNum(nodenum),
+        NodeQueueId(0),  Latency(0), NumPreds(0), NumSuccs(0), NumPredsLeft(0),
+        NumSuccsLeft(0), isTwoAddress(false), isCommutable(false),
+        hasPhysRegDefs(false), hasPhysRegClobbers(false),
         isPending(false), isAvailable(false), isScheduled(false),
         isScheduleHigh(false), isCloned(false),
         isDepthCurrent(false), isHeightCurrent(false), Depth(0), Height(0),
@@ -275,10 +282,10 @@ namespace llvm {
     /// SUnit - Construct an SUnit for post-regalloc scheduling to represent
     /// a MachineInstr.
     SUnit(MachineInstr *instr, unsigned nodenum)
-      : Node(0), Instr(instr), OrigNode(0), NodeNum(nodenum), NodeQueueId(0),
-        Latency(0), NumPreds(0), NumSuccs(0), NumPredsLeft(0), NumSuccsLeft(0),
-        isTwoAddress(false), isCommutable(false), hasPhysRegDefs(false),
-        hasPhysRegClobbers(false),
+      : Node(0), Instr(instr), DbgInstr(0), OrigNode(0), NodeNum(nodenum),
+        NodeQueueId(0), Latency(0), NumPreds(0), NumSuccs(0), NumPredsLeft(0),
+        NumSuccsLeft(0), isTwoAddress(false), isCommutable(false),
+        hasPhysRegDefs(false), hasPhysRegClobbers(false),
         isPending(false), isAvailable(false), isScheduled(false),
         isScheduleHigh(false), isCloned(false),
         isDepthCurrent(false), isHeightCurrent(false), Depth(0), Height(0),
@@ -286,10 +293,10 @@ namespace llvm {
 
     /// SUnit - Construct a placeholder SUnit.
     SUnit()
-      : Node(0), Instr(0), OrigNode(0), NodeNum(~0u), NodeQueueId(0),
-        Latency(0), NumPreds(0), NumSuccs(0), NumPredsLeft(0), NumSuccsLeft(0),
-        isTwoAddress(false), isCommutable(false), hasPhysRegDefs(false),
-        hasPhysRegClobbers(false),
+      : Node(0), Instr(0), DbgInstr(0), OrigNode(0), NodeNum(~0u),
+        NodeQueueId(0), Latency(0), NumPreds(0), NumSuccs(0), NumPredsLeft(0),
+        NumSuccsLeft(0), isTwoAddress(false), isCommutable(false),
+        hasPhysRegDefs(false), hasPhysRegClobbers(false),
         isPending(false), isAvailable(false), isScheduled(false),
         isScheduleHigh(false), isCloned(false),
         isDepthCurrent(false), isHeightCurrent(false), Depth(0), Height(0),
@@ -323,6 +330,20 @@ namespace llvm {
       return Instr;
     }
 
+    /// setDbgInstr - Assign the debug instruction for the SUnit.
+    /// This may be used during post-regalloc scheduling.
+    void setDbgInstr(MachineInstr *MI) {
+      assert(!Node && "Setting debug MachineInstr of SUnit with SDNode!");
+      DbgInstr = MI;
+    }
+
+    /// getDbgInstr - Return the debug MachineInstr for this SUnit.
+    /// This may be used during post-regalloc scheduling.
+    MachineInstr *getDbgInstr() const {
+      assert(!Node && "Reading debug MachineInstr of SUnit with SDNode!");
+      return DbgInstr;
+    }
+
     /// addPred - This adds the specified edge as a pred of the current node if
     /// not already.  It also adds the current node as a successor of the
     /// specified node.
@@ -336,25 +357,27 @@ namespace llvm {
     /// getDepth - Return the depth of this node, which is the length of the
     /// maximum path up to any node with has no predecessors.
     unsigned getDepth() const {
-      if (!isDepthCurrent) const_cast<SUnit *>(this)->ComputeDepth();
+      if (!isDepthCurrent) 
+        const_cast<SUnit *>(this)->ComputeDepth();
       return Depth;
     }
 
     /// getHeight - Return the height of this node, which is the length of the
     /// maximum path down to any node with has no successors.
     unsigned getHeight() const {
-      if (!isHeightCurrent) const_cast<SUnit *>(this)->ComputeHeight();
+      if (!isHeightCurrent) 
+        const_cast<SUnit *>(this)->ComputeHeight();
       return Height;
     }
 
-    /// setDepthToAtLeast - If NewDepth is greater than this node's depth
-    /// value, set it to be the new depth value. This also recursively
-    /// marks successor nodes dirty.
+    /// setDepthToAtLeast - If NewDepth is greater than this node's
+    /// depth value, set it to be the new depth value. This also
+    /// recursively marks successor nodes dirty.
     void setDepthToAtLeast(unsigned NewDepth);
 
-    /// setDepthToAtLeast - If NewDepth is greater than this node's depth
-    /// value, set it to be the new height value. This also recursively
-    /// marks predecessor nodes dirty.
+    /// setDepthToAtLeast - If NewDepth is greater than this node's
+    /// depth value, set it to be the new height value. This also
+    /// recursively marks predecessor nodes dirty.
     void setHeightToAtLeast(unsigned NewHeight);
 
     /// setDepthDirty - Set a flag in this node to indicate that its
@@ -429,8 +452,8 @@ namespace llvm {
 
   class ScheduleDAG {
   public:
-    MachineBasicBlock *BB;                // The block in which to insert instructions.
-    MachineBasicBlock::iterator InsertPos;// The position to insert instructions.
+    MachineBasicBlock *BB;          // The block in which to insert instructions
+    MachineBasicBlock::iterator InsertPos;// The position to insert instructions
     const TargetMachine &TM;              // Target processor
     const TargetInstrInfo *TII;           // Target instruction information
     const TargetRegisterInfo *TRI;        // Target processor register info
@@ -456,7 +479,8 @@ namespace llvm {
     /// EmitSchedule - Insert MachineInstrs into the MachineBasicBlock
     /// according to the order specified in Sequence.
     ///
-    virtual MachineBasicBlock *EmitSchedule() = 0;
+    virtual MachineBasicBlock*
+    EmitSchedule(DenseMap<MachineBasicBlock*, MachineBasicBlock*>*) = 0;
 
     void dumpSchedule() const;
 
@@ -484,19 +508,25 @@ namespace llvm {
     /// BuildSchedGraph - Build SUnits and set up their Preds and Succs
     /// to form the scheduling dependency graph.
     ///
-    virtual void BuildSchedGraph() = 0;
+    virtual void BuildSchedGraph(AliasAnalysis *AA) = 0;
 
     /// ComputeLatency - Compute node latency.
     ///
     virtual void ComputeLatency(SUnit *SU) = 0;
+
+    /// ComputeOperandLatency - Override dependence edge latency using
+    /// operand use/def information
+    ///
+    virtual void ComputeOperandLatency(SUnit *, SUnit *,
+                                       SDep&) const { }
 
     /// Schedule - Order nodes according to selected style, filling
     /// in the Sequence member.
     ///
     virtual void Schedule() = 0;
 
-    /// ForceUnitLatencies - Return true if all scheduling edges should be given a
-    /// latency value of one.  The default is to return false; schedulers may
+    /// ForceUnitLatencies - Return true if all scheduling edges should be given
+    /// a latency value of one.  The default is to return false; schedulers may
     /// override this as needed.
     virtual bool ForceUnitLatencies() const { return false; }
 
@@ -504,27 +534,11 @@ namespace llvm {
     ///
     void EmitNoop();
 
-    void AddMemOperand(MachineInstr *MI, const MachineMemOperand &MO);
-
     void EmitPhysRegCopy(SUnit *SU, DenseMap<SUnit*, unsigned> &VRBaseMap);
-
-  private:
-    /// EmitLiveInCopy - Emit a copy for a live in physical register. If the
-    /// physical register has only a single copy use, then coalesced the copy
-    /// if possible.
-    void EmitLiveInCopy(MachineBasicBlock *MBB,
-                        MachineBasicBlock::iterator &InsertPos,
-                        unsigned VirtReg, unsigned PhysReg,
-                        const TargetRegisterClass *RC,
-                        DenseMap<MachineInstr*, unsigned> &CopyRegMap);
-
-    /// EmitLiveInCopies - If this is the first basic block in the function,
-    /// and if it has live ins that need to be copied into vregs, emit the
-    /// copies into the top of the block.
-    void EmitLiveInCopies(MachineBasicBlock *MBB);
   };
 
-  class SUnitIterator : public forward_iterator<SUnit, ptrdiff_t> {
+  class SUnitIterator : public std::iterator<std::forward_iterator_tag,
+                                             SUnit, ptrdiff_t> {
     SUnit *Node;
     unsigned Operand;
 
@@ -536,7 +550,7 @@ namespace llvm {
     bool operator!=(const SUnitIterator& x) const { return !operator==(x); }
 
     const SUnitIterator &operator=(const SUnitIterator &I) {
-      assert(I.Node == Node && "Cannot assign iterators to two different nodes!");
+      assert(I.Node==Node && "Cannot assign iterators to two different nodes!");
       Operand = I.Operand;
       return *this;
     }

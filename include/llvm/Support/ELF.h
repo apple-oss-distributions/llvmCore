@@ -21,7 +21,7 @@
 #ifndef LLVM_SUPPORT_ELF_H
 #define LLVM_SUPPORT_ELF_H
 
-#include "llvm/Support/DataTypes.h"
+#include "llvm/System/DataTypes.h"
 #include <cstring>
 
 namespace llvm {
@@ -113,7 +113,8 @@ enum {
   EM_PPC = 20,     // PowerPC
   EM_ARM = 40,     // ARM
   EM_ALPHA = 41,   // DEC Alpha
-  EM_SPARCV9 = 43  // SPARC V9
+  EM_SPARCV9 = 43, // SPARC V9
+  EM_X86_64 = 62   // AMD64
 };
 
 // Object file classes.

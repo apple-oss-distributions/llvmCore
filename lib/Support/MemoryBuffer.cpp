@@ -46,7 +46,7 @@ MemoryBuffer::~MemoryBuffer() {
 /// successfully.
 void MemoryBuffer::initCopyOf(const char *BufStart, const char *BufEnd) {
   size_t Size = BufEnd-BufStart;
-  BufferStart = (char *)malloc((Size+1) * sizeof(char));
+  BufferStart = (char *)malloc(Size+1);
   BufferEnd = BufferStart+Size;
   memcpy(const_cast<char*>(BufferStart), BufStart, Size);
   *const_cast<char*>(BufferEnd) = 0;   // Null terminate buffer.
@@ -70,7 +70,7 @@ namespace {
 class MemoryBufferMem : public MemoryBuffer {
   std::string FileID;
 public:
-  MemoryBufferMem(const char *Start, const char *End, const char *FID,
+  MemoryBufferMem(const char *Start, const char *End, StringRef FID,
                   bool Copy = false)
   : FileID(FID) {
     if (!Copy)
@@ -107,8 +107,8 @@ MemoryBuffer *MemoryBuffer::getMemBufferCopy(const char *StartPtr,
 /// initialize the memory allocated by this method.  The memory is owned by
 /// the MemoryBuffer object.
 MemoryBuffer *MemoryBuffer::getNewUninitMemBuffer(size_t Size,
-                                                  const char *BufferName) {
-  char *Buf = (char *)malloc((Size+1) * sizeof(char));
+                                                  StringRef BufferName) {
+  char *Buf = (char *)malloc(Size+1);
   if (!Buf) return 0;
   Buf[Size] = 0;
   MemoryBufferMem *SB = new MemoryBufferMem(Buf, Buf+Size, BufferName);
@@ -134,17 +134,13 @@ MemoryBuffer *MemoryBuffer::getNewMemBuffer(size_t Size,
 /// if the Filename is "-".  If an error occurs, this returns null and fills
 /// in *ErrStr with a reason.  If stdin is empty, this API (unlike getSTDIN)
 /// returns an empty buffer.
-MemoryBuffer *MemoryBuffer::getFileOrSTDIN(const char *Filename,
+MemoryBuffer *MemoryBuffer::getFileOrSTDIN(StringRef Filename,
                                            std::string *ErrStr,
-                                           int64_t FileSize) {
-  if (Filename[0] != '-' || Filename[1] != 0)
-    return getFile(Filename, ErrStr, FileSize);
-  MemoryBuffer *M = getSTDIN();
-  if (M) return M;
-
-  // If stdin was empty, M is null.  Cons up an empty memory buffer now.
-  const char *EmptyStr = "";
-  return MemoryBuffer::getMemBuffer(EmptyStr, EmptyStr, "<stdin>");
+                                           int64_t FileSize,
+                                           struct stat *FileInfo) {
+  if (Filename == "-")
+    return getSTDIN();
+  return getFile(Filename, ErrStr, FileSize, FileInfo);
 }
 
 //===----------------------------------------------------------------------===//
@@ -158,7 +154,7 @@ namespace {
 class MemoryBufferMMapFile : public MemoryBuffer {
   std::string Filename;
 public:
-  MemoryBufferMMapFile(const char *filename, const char *Pages, uint64_t Size)
+  MemoryBufferMMapFile(StringRef filename, const char *Pages, uint64_t Size)
     : Filename(filename) {
     init(Pages, Pages+Size);
   }
@@ -173,29 +169,32 @@ public:
 };
 }
 
-MemoryBuffer *MemoryBuffer::getFile(const char *Filename, std::string *ErrStr,
-                                    int64_t FileSize) {
+MemoryBuffer *MemoryBuffer::getFile(StringRef Filename, std::string *ErrStr,
+                                    int64_t FileSize, struct stat *FileInfo) {
   int OpenFlags = 0;
 #ifdef O_BINARY
   OpenFlags |= O_BINARY;  // Open input file in binary mode on win32.
 #endif
-  int FD = ::open(Filename, O_RDONLY|OpenFlags);
+  SmallString<256> PathBuf(Filename.begin(), Filename.end());
+  int FD = ::open(PathBuf.c_str(), O_RDONLY|OpenFlags);
   if (FD == -1) {
-    if (ErrStr) *ErrStr = "could not open file";
+    if (ErrStr) *ErrStr = strerror(errno);
     return 0;
   }
   
   // If we don't know the file size, use fstat to find out.  fstat on an open
   // file descriptor is cheaper than stat on a random path.
-  if (FileSize == -1) {
-    struct stat FileInfo;
+  if (FileSize == -1 || FileInfo) {
+    struct stat MyFileInfo;
+    struct stat *FileInfoPtr = FileInfo? FileInfo : &MyFileInfo;
+    
     // TODO: This should use fstat64 when available.
-    if (fstat(FD, &FileInfo) == -1) {
-      if (ErrStr) *ErrStr = "could not get file length";
+    if (fstat(FD, FileInfoPtr) == -1) {
+      if (ErrStr) *ErrStr = strerror(errno);
       ::close(FD);
       return 0;
     }
-    FileSize = FileInfo.st_size;
+    FileSize = FileInfoPtr->st_size;
   }
   
   
@@ -203,6 +202,8 @@ MemoryBuffer *MemoryBuffer::getFile(const char *Filename, std::string *ErrStr,
   // for small files, because this can severely fragment our address space. Also
   // don't try to map files that are exactly a multiple of the system page size,
   // as the file would not have the required null terminator.
+  //
+  // FIXME: Can we just mmap an extra page in the latter case?
   if (FileSize >= 4096*4 &&
       (FileSize & (sys::Process::GetPageSize()-1)) != 0) {
     if (const char *Pages = sys::Path::MapInFilePages(FD, FileSize)) {
@@ -226,15 +227,15 @@ MemoryBuffer *MemoryBuffer::getFile(const char *Filename, std::string *ErrStr,
   size_t BytesLeft = FileSize;
   while (BytesLeft) {
     ssize_t NumRead = ::read(FD, BufPtr, BytesLeft);
-    if (NumRead != -1) {
+    if (NumRead > 0) {
       BytesLeft -= NumRead;
       BufPtr += NumRead;
-    } else if (errno == EINTR) {
+    } else if (NumRead == -1 && errno == EINTR) {
       // try again
     } else {
       // error reading.
+      if (ErrStr) *ErrStr = strerror(errno);
       close(FD);
-      if (ErrStr) *ErrStr = "error reading file data";
       return 0;
     }
   }
@@ -258,18 +259,22 @@ public:
 
 MemoryBuffer *MemoryBuffer::getSTDIN() {
   char Buffer[4096*4];
-  
+
   std::vector<char> FileData;
-  
+
   // Read in all of the data from stdin, we cannot mmap stdin.
+  //
+  // FIXME: That isn't necessarily true, we should try to mmap stdin and
+  // fallback if it fails.
   sys::Program::ChangeStdinToBinary();
-  while (size_t ReadBytes = fread(Buffer, sizeof(char), 4096*4, stdin))
+  size_t ReadBytes;
+  do {
+    ReadBytes = fread(Buffer, sizeof(char), sizeof(Buffer), stdin);
     FileData.insert(FileData.end(), Buffer, Buffer+ReadBytes);
+  } while (ReadBytes == sizeof(Buffer));
 
   FileData.push_back(0); // &FileData[Size] is invalid. So is &*FileData.end().
   size_t Size = FileData.size();
-  if (Size <= 1)
-    return 0;
   MemoryBuffer *B = new STDINBufferFile();
   B->initCopyOf(&FileData[0], &FileData[Size-1]);
   return B;

@@ -33,8 +33,9 @@ class MachineFunction;
 class MachineInstr;
 class Value;
 class Module;
-class GlobalVariable;
-class TargetAsmInfo;
+class MDNode;
+class MCAsmInfo;
+class MCSymbol;
 class raw_ostream;
 class Instruction;
 class DICompileUnit;
@@ -68,7 +69,7 @@ public:
   /// BeginModule - Emit all Dwarf sections that should come prior to the
   /// content.
   void BeginModule(Module *M, MachineModuleInfo *MMI, raw_ostream &OS,
-                   AsmPrinter *A, const TargetAsmInfo *T);
+                   AsmPrinter *A, const MCAsmInfo *T);
   
   /// EndModule - Emit all Dwarf sections that should come after the content.
   ///
@@ -76,47 +77,27 @@ public:
   
   /// BeginFunction - Gather pre-function debug information.  Assumes being 
   /// emitted immediately after the function entry point.
-  void BeginFunction(MachineFunction *MF);
+  void BeginFunction(const MachineFunction *MF);
   
   /// EndFunction - Gather and emit post-function debug information.
   ///
-  void EndFunction(MachineFunction *MF);
+  void EndFunction(const MachineFunction *MF);
 
-  /// RecordSourceLine - Register a source line with debug info. Returns a
-  /// unique label ID used to generate a label and provide correspondence to
+  /// RecordSourceLine - Register a source line with debug info. Returns the
+  /// unique label that was emitted and which provides correspondence to
   /// the source line list.
-  unsigned RecordSourceLine(unsigned Line, unsigned Col, DICompileUnit CU);
-
-  /// RecordRegionStart - Indicate the start of a region.
-  unsigned RecordRegionStart(GlobalVariable *V);
-
-  /// RecordRegionEnd - Indicate the end of a region.
-  unsigned RecordRegionEnd(GlobalVariable *V);
+  MCSymbol *RecordSourceLine(unsigned Line, unsigned Col, MDNode *Scope);
 
   /// getRecordSourceLineCount - Count source lines.
   unsigned getRecordSourceLineCount();
-
-  /// RecordVariable - Indicate the declaration of  a local variable.
-  ///
-  void RecordVariable(GlobalVariable *GV, unsigned FrameIndex, 
-                      const MachineInstr *MI);
 
   /// ShouldEmitDwarfDebug - Returns true if Dwarf debugging declarations should
   /// be emitted.
   bool ShouldEmitDwarfDebug() const;
 
-  //// RecordInlinedFnStart - Indicate the start of a inlined function.
-  unsigned RecordInlinedFnStart(DISubprogram SP, DICompileUnit CU,
-                                unsigned Line, unsigned Col);
-
-  /// RecordInlinedFnEnd - Indicate the end of inlined subroutine.
-  unsigned RecordInlinedFnEnd(DISubprogram SP);
-
-  /// RecordVariableScope - Record scope for the variable declared by
-  /// DeclareMI. DeclareMI must describe TargetInstrInfo::DECLARE.
-  void RecordVariableScope(DIVariable &DV, const MachineInstr *DeclareMI);
+  void BeginScope(const MachineInstr *MI, MCSymbol *Label);
+  void EndScope(const MachineInstr *MI);
 };
-
 
 } // end llvm namespace
 
