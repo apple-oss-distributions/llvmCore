@@ -1,8 +1,10 @@
 add_executable(tblgen
+  ARMDecoderEmitter.cpp
   AsmMatcherEmitter.cpp
   AsmWriterEmitter.cpp
   AsmWriterInst.cpp
   CallingConvEmitter.cpp
+  ClangASTNodesEmitter.cpp
   ClangDiagnosticsEmitter.cpp
   CodeEmitterGen.cpp
   CodeGenDAGPatterns.cpp

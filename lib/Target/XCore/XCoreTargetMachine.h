@@ -20,6 +20,7 @@
 #include "XCoreSubtarget.h"
 #include "XCoreInstrInfo.h"
 #include "XCoreISelLowering.h"
+#include "XCoreSelectionDAGInfo.h"
 
 namespace llvm {
 
@@ -29,6 +30,7 @@ class XCoreTargetMachine : public LLVMTargetMachine {
   XCoreInstrInfo InstrInfo;
   XCoreFrameInfo FrameInfo;
   XCoreTargetLowering TLInfo;
+  XCoreSelectionDAGInfo TSInfo;
 public:
   XCoreTargetMachine(const Target &T, const std::string &TT,
                      const std::string &FS);
@@ -36,8 +38,12 @@ public:
   virtual const XCoreInstrInfo *getInstrInfo() const { return &InstrInfo; }
   virtual const XCoreFrameInfo *getFrameInfo() const { return &FrameInfo; }
   virtual const XCoreSubtarget *getSubtargetImpl() const { return &Subtarget; }
-  virtual       XCoreTargetLowering *getTargetLowering() const {
-    return const_cast<XCoreTargetLowering*>(&TLInfo);
+  virtual const XCoreTargetLowering *getTargetLowering() const {
+    return &TLInfo;
+  }
+
+  virtual const XCoreSelectionDAGInfo* getSelectionDAGInfo() const {
+    return &TSInfo;
   }
 
   virtual const TargetRegisterInfo *getRegisterInfo() const {

@@ -112,7 +112,7 @@ unsigned AlphaInstrInfo::InsertBranch(MachineBasicBlock &MBB,
                                       MachineBasicBlock *FBB,
                             const SmallVectorImpl<MachineOperand> &Cond) const {
   // FIXME this should probably have a DebugLoc argument
-  DebugLoc dl = DebugLoc::getUnknownLoc();
+  DebugLoc dl;
   assert(TBB && "InsertBranch must not be told to insert a fallthrough");
   assert((Cond.size() == 2 || Cond.size() == 0) && 
          "Alpha branch conditions have two components!");
@@ -146,15 +146,13 @@ bool AlphaInstrInfo::copyRegToReg(MachineBasicBlock &MBB,
                                   MachineBasicBlock::iterator MI,
                                   unsigned DestReg, unsigned SrcReg,
                                   const TargetRegisterClass *DestRC,
-                                  const TargetRegisterClass *SrcRC) const {
+                                  const TargetRegisterClass *SrcRC,
+                                  DebugLoc DL) const {
   //cerr << "copyRegToReg " << DestReg << " <- " << SrcReg << "\n";
   if (DestRC != SrcRC) {
     // Not yet supported!
     return false;
   }
-
-  DebugLoc DL = DebugLoc::getUnknownLoc();
-  if (MI != MBB.end()) DL = MI->getDebugLoc();
 
   if (DestRC == Alpha::GPRCRegisterClass) {
     BuildMI(MBB, MI, DL, get(Alpha::BISr), DestReg)
@@ -180,12 +178,13 @@ void
 AlphaInstrInfo::storeRegToStackSlot(MachineBasicBlock &MBB,
                                     MachineBasicBlock::iterator MI,
                                     unsigned SrcReg, bool isKill, int FrameIdx,
-                                    const TargetRegisterClass *RC) const {
+                                    const TargetRegisterClass *RC,
+                                    const TargetRegisterInfo *TRI) const {
   //cerr << "Trying to store " << getPrettyName(SrcReg) << " to "
   //     << FrameIdx << "\n";
   //BuildMI(MBB, MI, Alpha::WTF, 0).addReg(SrcReg);
 
-  DebugLoc DL = DebugLoc::getUnknownLoc();
+  DebugLoc DL;
   if (MI != MBB.end()) DL = MI->getDebugLoc();
 
   if (RC == Alpha::F4RCRegisterClass)
@@ -208,10 +207,11 @@ void
 AlphaInstrInfo::loadRegFromStackSlot(MachineBasicBlock &MBB,
                                         MachineBasicBlock::iterator MI,
                                         unsigned DestReg, int FrameIdx,
-                                        const TargetRegisterClass *RC) const {
+                                     const TargetRegisterClass *RC,
+                                     const TargetRegisterInfo *TRI) const {
   //cerr << "Trying to load " << getPrettyName(DestReg) << " to "
   //     << FrameIdx << "\n";
-  DebugLoc DL = DebugLoc::getUnknownLoc();
+  DebugLoc DL;
   if (MI != MBB.end()) DL = MI->getDebugLoc();
 
   if (RC == Alpha::F4RCRegisterClass)
@@ -301,7 +301,15 @@ bool AlphaInstrInfo::AnalyzeBranch(MachineBasicBlock &MBB,MachineBasicBlock *&TB
                                    bool AllowModify) const {
   // If the block has no terminators, it just falls into the block after it.
   MachineBasicBlock::iterator I = MBB.end();
-  if (I == MBB.begin() || !isUnpredicatedTerminator(--I))
+  if (I == MBB.begin())
+    return false;
+  --I;
+  while (I->isDebugValue()) {
+    if (I == MBB.begin())
+      return false;
+    --I;
+  }
+  if (!isUnpredicatedTerminator(I))
     return false;
 
   // Get the last instruction in the block.
@@ -362,6 +370,11 @@ unsigned AlphaInstrInfo::RemoveBranch(MachineBasicBlock &MBB) const {
   MachineBasicBlock::iterator I = MBB.end();
   if (I == MBB.begin()) return 0;
   --I;
+  while (I->isDebugValue()) {
+    if (I == MBB.begin())
+      return 0;
+    --I;
+  }
   if (I->getOpcode() != Alpha::BR && 
       I->getOpcode() != Alpha::COND_BRANCH_I &&
       I->getOpcode() != Alpha::COND_BRANCH_F)
@@ -385,8 +398,7 @@ unsigned AlphaInstrInfo::RemoveBranch(MachineBasicBlock &MBB) const {
 
 void AlphaInstrInfo::insertNoop(MachineBasicBlock &MBB, 
                                 MachineBasicBlock::iterator MI) const {
-  DebugLoc DL = DebugLoc::getUnknownLoc();
-  if (MI != MBB.end()) DL = MI->getDebugLoc();
+  DebugLoc DL;
   BuildMI(MBB, MI, DL, get(Alpha::BISr), Alpha::R31)
     .addReg(Alpha::R31)
     .addReg(Alpha::R31);
@@ -417,7 +429,8 @@ unsigned AlphaInstrInfo::getGlobalBaseReg(MachineFunction *MF) const {
 
   GlobalBaseReg = RegInfo.createVirtualRegister(&Alpha::GPRCRegClass);
   bool Ok = TII->copyRegToReg(FirstMBB, MBBI, GlobalBaseReg, Alpha::R29,
-                              &Alpha::GPRCRegClass, &Alpha::GPRCRegClass);
+                              &Alpha::GPRCRegClass, &Alpha::GPRCRegClass,
+                              DebugLoc());
   assert(Ok && "Couldn't assign to global base register!");
   Ok = Ok; // Silence warning when assertions are turned off.
   RegInfo.addLiveIn(Alpha::R29);
@@ -444,7 +457,8 @@ unsigned AlphaInstrInfo::getGlobalRetAddr(MachineFunction *MF) const {
 
   GlobalRetAddr = RegInfo.createVirtualRegister(&Alpha::GPRCRegClass);
   bool Ok = TII->copyRegToReg(FirstMBB, MBBI, GlobalRetAddr, Alpha::R26,
-                              &Alpha::GPRCRegClass, &Alpha::GPRCRegClass);
+                              &Alpha::GPRCRegClass, &Alpha::GPRCRegClass,
+                              DebugLoc());
   assert(Ok && "Couldn't assign to global return address register!");
   Ok = Ok; // Silence warning when assertions are turned off.
   RegInfo.addLiveIn(Alpha::R26);

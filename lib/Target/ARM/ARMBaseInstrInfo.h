@@ -93,34 +93,34 @@ namespace ARMII {
     StMiscFrm     = 9  << FormShift,
     LdStMulFrm    = 10 << FormShift,
 
-    LdStExFrm     = 28 << FormShift,
+    LdStExFrm     = 11 << FormShift,
 
     // Miscellaneous arithmetic instructions
-    ArithMiscFrm  = 11 << FormShift,
+    ArithMiscFrm  = 12 << FormShift,
 
     // Extend instructions
-    ExtFrm        = 12 << FormShift,
+    ExtFrm        = 13 << FormShift,
 
     // VFP formats
-    VFPUnaryFrm   = 13 << FormShift,
-    VFPBinaryFrm  = 14 << FormShift,
-    VFPConv1Frm   = 15 << FormShift,
-    VFPConv2Frm   = 16 << FormShift,
-    VFPConv3Frm   = 17 << FormShift,
-    VFPConv4Frm   = 18 << FormShift,
-    VFPConv5Frm   = 19 << FormShift,
-    VFPLdStFrm    = 20 << FormShift,
-    VFPLdStMulFrm = 21 << FormShift,
-    VFPMiscFrm    = 22 << FormShift,
+    VFPUnaryFrm   = 14 << FormShift,
+    VFPBinaryFrm  = 15 << FormShift,
+    VFPConv1Frm   = 16 << FormShift,
+    VFPConv2Frm   = 17 << FormShift,
+    VFPConv3Frm   = 18 << FormShift,
+    VFPConv4Frm   = 19 << FormShift,
+    VFPConv5Frm   = 20 << FormShift,
+    VFPLdStFrm    = 21 << FormShift,
+    VFPLdStMulFrm = 22 << FormShift,
+    VFPMiscFrm    = 23 << FormShift,
 
     // Thumb format
-    ThumbFrm      = 23 << FormShift,
+    ThumbFrm      = 24 << FormShift,
 
     // NEON format
-    NEONFrm       = 24 << FormShift,
-    NEONGetLnFrm  = 25 << FormShift,
-    NEONSetLnFrm  = 26 << FormShift,
-    NEONDupFrm    = 27 << FormShift,
+    NEONFrm       = 25 << FormShift,
+    NEONGetLnFrm  = 26 << FormShift,
+    NEONSetLnFrm  = 27 << FormShift,
+    NEONDupFrm    = 28 << FormShift,
 
     //===------------------------------------------------------------------===//
     // Misc flags.
@@ -257,17 +257,26 @@ public:
                             MachineBasicBlock::iterator I,
                             unsigned DestReg, unsigned SrcReg,
                             const TargetRegisterClass *DestRC,
-                            const TargetRegisterClass *SrcRC) const;
+                            const TargetRegisterClass *SrcRC,
+                            DebugLoc DL) const;
 
   virtual void storeRegToStackSlot(MachineBasicBlock &MBB,
                                    MachineBasicBlock::iterator MBBI,
                                    unsigned SrcReg, bool isKill, int FrameIndex,
-                                   const TargetRegisterClass *RC) const;
+                                   const TargetRegisterClass *RC,
+                                   const TargetRegisterInfo *TRI) const;
 
   virtual void loadRegFromStackSlot(MachineBasicBlock &MBB,
                                     MachineBasicBlock::iterator MBBI,
                                     unsigned DestReg, int FrameIndex,
-                                    const TargetRegisterClass *RC) const;
+                                    const TargetRegisterClass *RC,
+                                    const TargetRegisterInfo *TRI) const;
+
+  virtual MachineInstr *emitFrameIndexDebugValue(MachineFunction &MF,
+                                                 int FrameIx,
+                                                 uint64_t Offset,
+                                                 const MDNode *MDPtr,
+                                                 DebugLoc DL) const;
 
   virtual bool canFoldMemoryOperand(const MachineInstr *MI,
                                     const SmallVectorImpl<unsigned> &Ops) const;

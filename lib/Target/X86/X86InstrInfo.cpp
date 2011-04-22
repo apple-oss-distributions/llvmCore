@@ -27,6 +27,7 @@
 #include "llvm/CodeGen/MachineRegisterInfo.h"
 #include "llvm/CodeGen/LiveVariables.h"
 #include "llvm/CodeGen/PseudoSourceValue.h"
+#include "llvm/MC/MCInst.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/ErrorHandling.h"
@@ -1064,7 +1065,7 @@ void X86InstrInfo::reMaterialize(MachineBasicBlock &MBB,
                                  unsigned DestReg, unsigned SubIdx,
                                  const MachineInstr *Orig,
                                  const TargetRegisterInfo *TRI) const {
-  DebugLoc DL = MBB.findDebugLoc(I);
+  DebugLoc DL = Orig->getDebugLoc();
 
   if (SubIdx && TargetRegisterInfo::isPhysicalRegister(DestReg)) {
     DestReg = TRI->getSubReg(DestReg, SubIdx);
@@ -1684,8 +1685,11 @@ bool X86InstrInfo::AnalyzeBranch(MachineBasicBlock &MBB,
   // Start from the bottom of the block and work up, examining the
   // terminator instructions.
   MachineBasicBlock::iterator I = MBB.end();
+  MachineBasicBlock::iterator UnCondBrIter = MBB.end();
   while (I != MBB.begin()) {
     --I;
+    if (I->isDebugValue())
+      continue;
 
     // Working from the bottom, when we see a non-terminator instruction, we're
     // done.
@@ -1699,6 +1703,8 @@ bool X86InstrInfo::AnalyzeBranch(MachineBasicBlock &MBB,
 
     // Handle unconditional branches.
     if (I->getOpcode() == X86::JMP_4) {
+      UnCondBrIter = I;
+
       if (!AllowModify) {
         TBB = I->getOperand(0).getMBB();
         continue;
@@ -1716,10 +1722,11 @@ bool X86InstrInfo::AnalyzeBranch(MachineBasicBlock &MBB,
         TBB = 0;
         I->eraseFromParent();
         I = MBB.end();
+        UnCondBrIter = MBB.end();
         continue;
       }
 
-      // TBB is used to indicate the unconditinal destination.
+      // TBB is used to indicate the unconditional destination.
       TBB = I->getOperand(0).getMBB();
       continue;
     }
@@ -1731,6 +1738,45 @@ bool X86InstrInfo::AnalyzeBranch(MachineBasicBlock &MBB,
 
     // Working from the bottom, handle the first conditional branch.
     if (Cond.empty()) {
+      MachineBasicBlock *TargetBB = I->getOperand(0).getMBB();
+      if (AllowModify && UnCondBrIter != MBB.end() &&
+          MBB.isLayoutSuccessor(TargetBB)) {
+        // If we can modify the code and it ends in something like:
+        //
+        //     jCC L1
+        //     jmp L2
+        //   L1:
+        //     ...
+        //   L2:
+        //
+        // Then we can change this to:
+        //
+        //     jnCC L2
+        //   L1:
+        //     ...
+        //   L2:
+        //
+        // Which is a bit more efficient.
+        // We conditionally jump to the fall-through block.
+        BranchCode = GetOppositeBranchCondition(BranchCode);
+        unsigned JNCC = GetCondBranchFromCond(BranchCode);
+        MachineBasicBlock::iterator OldInst = I;
+
+        BuildMI(MBB, UnCondBrIter, MBB.findDebugLoc(I), get(JNCC))
+          .addMBB(UnCondBrIter->getOperand(0).getMBB());
+        BuildMI(MBB, UnCondBrIter, MBB.findDebugLoc(I), get(X86::JMP_4))
+          .addMBB(TargetBB);
+        MBB.addSuccessor(TargetBB);
+
+        OldInst->eraseFromParent();
+        UnCondBrIter->eraseFromParent();
+
+        // Restart the analysis.
+        UnCondBrIter = MBB.end();
+        I = MBB.end();
+        continue;
+      }
+
       FBB = TBB;
       TBB = I->getOperand(0).getMBB();
       Cond.push_back(MachineOperand::CreateImm(BranchCode));
@@ -1782,6 +1828,8 @@ unsigned X86InstrInfo::RemoveBranch(MachineBasicBlock &MBB) const {
 
   while (I != MBB.begin()) {
     --I;
+    if (I->isDebugValue())
+      continue;
     if (I->getOpcode() != X86::JMP_4 &&
         GetCondFromBranchOpc(I->getOpcode()) == X86::COND_INVALID)
       break;
@@ -1799,7 +1847,7 @@ X86InstrInfo::InsertBranch(MachineBasicBlock &MBB, MachineBasicBlock *TBB,
                            MachineBasicBlock *FBB,
                            const SmallVectorImpl<MachineOperand> &Cond) const {
   // FIXME this should probably have a DebugLoc operand
-  DebugLoc dl = DebugLoc::getUnknownLoc();
+  DebugLoc dl;
   // Shouldn't be a fall through.
   assert(TBB && "InsertBranch must not be told to insert a fallthrough");
   assert((Cond.size() == 1 || Cond.size() == 0) &&
@@ -1853,8 +1901,8 @@ bool X86InstrInfo::copyRegToReg(MachineBasicBlock &MBB,
                                 MachineBasicBlock::iterator MI,
                                 unsigned DestReg, unsigned SrcReg,
                                 const TargetRegisterClass *DestRC,
-                                const TargetRegisterClass *SrcRC) const {
-  DebugLoc DL = MBB.findDebugLoc(MI);
+                                const TargetRegisterClass *SrcRC,
+                                DebugLoc DL) const {
 
   // Determine if DstRC and SrcRC have a common superclass in common.
   const TargetRegisterClass *CommonRC = DestRC;
@@ -2085,7 +2133,8 @@ static unsigned getStoreRegOpcode(unsigned SrcReg,
 void X86InstrInfo::storeRegToStackSlot(MachineBasicBlock &MBB,
                                        MachineBasicBlock::iterator MI,
                                        unsigned SrcReg, bool isKill, int FrameIdx,
-                                       const TargetRegisterClass *RC) const {
+                                       const TargetRegisterClass *RC,
+                                       const TargetRegisterInfo *TRI) const {
   const MachineFunction &MF = *MBB.getParent();
   bool isAligned = (RI.getStackAlignment() >= 16) || RI.canRealignStack(MF);
   unsigned Opc = getStoreRegOpcode(SrcReg, RC, isAligned, TM);
@@ -2103,7 +2152,7 @@ void X86InstrInfo::storeRegToAddr(MachineFunction &MF, unsigned SrcReg,
                                   SmallVectorImpl<MachineInstr*> &NewMIs) const {
   bool isAligned = (*MMOBegin)->getAlignment() >= 16;
   unsigned Opc = getStoreRegOpcode(SrcReg, RC, isAligned, TM);
-  DebugLoc DL = DebugLoc::getUnknownLoc();
+  DebugLoc DL;
   MachineInstrBuilder MIB = BuildMI(MF, DL, get(Opc));
   for (unsigned i = 0, e = Addr.size(); i != e; ++i)
     MIB.addOperand(Addr[i]);
@@ -2182,7 +2231,8 @@ static unsigned getLoadRegOpcode(unsigned DestReg,
 void X86InstrInfo::loadRegFromStackSlot(MachineBasicBlock &MBB,
                                         MachineBasicBlock::iterator MI,
                                         unsigned DestReg, int FrameIdx,
-                                        const TargetRegisterClass *RC) const{
+                                        const TargetRegisterClass *RC,
+                                        const TargetRegisterInfo *TRI) const {
   const MachineFunction &MF = *MBB.getParent();
   bool isAligned = (RI.getStackAlignment() >= 16) || RI.canRealignStack(MF);
   unsigned Opc = getLoadRegOpcode(DestReg, RC, isAligned, TM);
@@ -2198,7 +2248,7 @@ void X86InstrInfo::loadRegFromAddr(MachineFunction &MF, unsigned DestReg,
                                  SmallVectorImpl<MachineInstr*> &NewMIs) const {
   bool isAligned = (*MMOBegin)->getAlignment() >= 16;
   unsigned Opc = getLoadRegOpcode(DestReg, RC, isAligned, TM);
-  DebugLoc DL = DebugLoc::getUnknownLoc();
+  DebugLoc DL;
   MachineInstrBuilder MIB = BuildMI(MF, DL, get(Opc), DestReg);
   for (unsigned i = 0, e = Addr.size(); i != e; ++i)
     MIB.addOperand(Addr[i]);
@@ -2236,7 +2286,8 @@ bool X86InstrInfo::spillCalleeSavedRegisters(MachineBasicBlock &MBB,
       CalleeFrameSize += SlotSize;
       BuildMI(MBB, MI, DL, get(Opc)).addReg(Reg, RegState::Kill);
     } else {
-      storeRegToStackSlot(MBB, MI, Reg, true, CSI[i-1].getFrameIdx(), RegClass);
+      storeRegToStackSlot(MBB, MI, Reg, true, CSI[i-1].getFrameIdx(), RegClass,
+                          &RI);
     }
   }
 
@@ -2266,10 +2317,23 @@ bool X86InstrInfo::restoreCalleeSavedRegisters(MachineBasicBlock &MBB,
     if (RegClass != &X86::VR128RegClass && !isWin64) {
       BuildMI(MBB, MI, DL, get(Opc), Reg);
     } else {
-      loadRegFromStackSlot(MBB, MI, Reg, CSI[i].getFrameIdx(), RegClass);
+      loadRegFromStackSlot(MBB, MI, Reg, CSI[i].getFrameIdx(), RegClass, &RI);
     }
   }
   return true;
+}
+
+MachineInstr*
+X86InstrInfo::emitFrameIndexDebugValue(MachineFunction &MF,
+                                       int FrameIx, uint64_t Offset,
+                                       const MDNode *MDPtr,
+                                       DebugLoc DL) const {
+  X86AddressMode AM;
+  AM.BaseType = X86AddressMode::FrameIndexBase;
+  AM.Base.FrameIndex = FrameIx;
+  MachineInstrBuilder MIB = BuildMI(MF, DL, get(X86::DBG_VALUE));
+  addFullAddress(MIB, AM).addImm(Offset).addMetadata(MDPtr);
+  return &*MIB;
 }
 
 static MachineInstr *FuseTwoAddrInst(MachineFunction &MF, unsigned Opcode,
@@ -2465,9 +2529,9 @@ MachineInstr* X86InstrInfo::foldMemoryOperandImpl(MachineFunction &MF,
     switch (MI->getOpcode()) {
     default: return NULL;
     case X86::TEST8rr:  NewOpc = X86::CMP8ri; RCSize = 1; break;
-    case X86::TEST16rr: NewOpc = X86::CMP16ri; RCSize = 2; break;
-    case X86::TEST32rr: NewOpc = X86::CMP32ri; RCSize = 4; break;
-    case X86::TEST64rr: NewOpc = X86::CMP64ri32; RCSize = 8; break;
+    case X86::TEST16rr: NewOpc = X86::CMP16ri8; RCSize = 2; break;
+    case X86::TEST32rr: NewOpc = X86::CMP32ri8; RCSize = 4; break;
+    case X86::TEST64rr: NewOpc = X86::CMP64ri8; RCSize = 8; break;
     }
     // Check if it's safe to fold the load. If the size of the object is
     // narrower than the load width, then it's not.
@@ -2514,7 +2578,9 @@ MachineInstr* X86InstrInfo::foldMemoryOperandImpl(MachineFunction &MF,
     Alignment = (*LoadMI->memoperands_begin())->getAlignment();
   else
     switch (LoadMI->getOpcode()) {
-    case X86::V_SET0:
+    case X86::V_SET0PS:
+    case X86::V_SET0PD:
+    case X86::V_SET0PI:
     case X86::V_SETALLONES:
       Alignment = 16;
       break;
@@ -2532,9 +2598,9 @@ MachineInstr* X86InstrInfo::foldMemoryOperandImpl(MachineFunction &MF,
     switch (MI->getOpcode()) {
     default: return NULL;
     case X86::TEST8rr:  NewOpc = X86::CMP8ri; break;
-    case X86::TEST16rr: NewOpc = X86::CMP16ri; break;
-    case X86::TEST32rr: NewOpc = X86::CMP32ri; break;
-    case X86::TEST64rr: NewOpc = X86::CMP64ri32; break;
+    case X86::TEST16rr: NewOpc = X86::CMP16ri8; break;
+    case X86::TEST32rr: NewOpc = X86::CMP32ri8; break;
+    case X86::TEST64rr: NewOpc = X86::CMP64ri8; break;
     }
     // Change to CMPXXri r, 0 first.
     MI->setDesc(get(NewOpc));
@@ -2544,11 +2610,13 @@ MachineInstr* X86InstrInfo::foldMemoryOperandImpl(MachineFunction &MF,
 
   SmallVector<MachineOperand,X86AddrNumOperands> MOs;
   switch (LoadMI->getOpcode()) {
-  case X86::V_SET0:
+  case X86::V_SET0PS:
+  case X86::V_SET0PD:
+  case X86::V_SET0PI:
   case X86::V_SETALLONES:
   case X86::FsFLD0SD:
   case X86::FsFLD0SS: {
-    // Folding a V_SET0 or V_SETALLONES as a load, to ease register pressure.
+    // Folding a V_SET0P? or V_SETALLONES as a load, to ease register pressure.
     // Create a constant-pool entry and operands to load from it.
 
     // Medium and large mode can't fold loads this way.
@@ -2578,7 +2646,7 @@ MachineInstr* X86InstrInfo::foldMemoryOperandImpl(MachineFunction &MF,
       Ty = Type::getDoubleTy(MF.getFunction()->getContext());
     else
       Ty = VectorType::get(Type::getInt32Ty(MF.getFunction()->getContext()), 4);
-    Constant *C = LoadMI->getOpcode() == X86::V_SETALLONES ?
+    const Constant *C = LoadMI->getOpcode() == X86::V_SETALLONES ?
                     Constant::getAllOnesValue(Ty) :
                     Constant::getNullValue(Ty);
     unsigned CPI = MCP.getConstantPoolIndex(C, Alignment);
@@ -2740,16 +2808,22 @@ bool X86InstrInfo::unfoldMemoryOperand(MachineFunction &MF, MachineInstr *MI,
   switch (DataMI->getOpcode()) {
   default: break;
   case X86::CMP64ri32:
+  case X86::CMP64ri8:
   case X86::CMP32ri:
+  case X86::CMP32ri8:
   case X86::CMP16ri:
+  case X86::CMP16ri8:
   case X86::CMP8ri: {
     MachineOperand &MO0 = DataMI->getOperand(0);
     MachineOperand &MO1 = DataMI->getOperand(1);
     if (MO1.getImm() == 0) {
       switch (DataMI->getOpcode()) {
       default: break;
+      case X86::CMP64ri8:
       case X86::CMP64ri32: NewOpc = X86::TEST64rr; break;
+      case X86::CMP32ri8:
       case X86::CMP32ri:   NewOpc = X86::TEST32rr; break;
+      case X86::CMP16ri8:
       case X86::CMP16ri:   NewOpc = X86::TEST16rr; break;
       case X86::CMP8ri:    NewOpc = X86::TEST8rr; break;
       }
@@ -2953,10 +3027,6 @@ X86InstrInfo::areLoadsFromSameBasePtr(SDNode *Load1, SDNode *Load2,
       Load1->getOperand(2) == Load2->getOperand(2)) {
     if (cast<ConstantSDNode>(Load1->getOperand(1))->getZExtValue() != 1)
       return false;
-    SDValue Op2 = Load1->getOperand(2);
-    if (!isa<RegisterSDNode>(Op2) ||
-        cast<RegisterSDNode>(Op2)->getReg() != 0)
-      return 0;
 
     // Now let's examine the displacements.
     if (isa<ConstantSDNode>(Load1->getOperand(3)) &&
@@ -3402,6 +3472,7 @@ static unsigned GetInstSizeWithDesc(const MachineInstr &MI,
     }
     case TargetOpcode::DBG_LABEL:
     case TargetOpcode::EH_LABEL:
+    case TargetOpcode::DBG_VALUE:
       break;
     case TargetOpcode::IMPLICIT_DEF:
     case TargetOpcode::KILL:
@@ -3599,7 +3670,7 @@ static unsigned GetInstSizeWithDesc(const MachineInstr &MI,
     std::string msg;
     raw_string_ostream Msg(msg);
     Msg << "Cannot determine size: " << MI;
-    llvm_report_error(Msg.str());
+    report_fatal_error(Msg.str());
   }
   
 
@@ -3657,3 +3728,57 @@ unsigned X86InstrInfo::getGlobalBaseReg(MachineFunction *MF) const {
   X86FI->setGlobalBaseReg(GlobalBaseReg);
   return GlobalBaseReg;
 }
+
+// These are the replaceable SSE instructions. Some of these have Int variants
+// that we don't include here. We don't want to replace instructions selected
+// by intrinsics.
+static const unsigned ReplaceableInstrs[][3] = {
+  //PackedInt       PackedSingle     PackedDouble
+  { X86::MOVAPSmr,   X86::MOVAPDmr,  X86::MOVDQAmr  },
+  { X86::MOVAPSrm,   X86::MOVAPDrm,  X86::MOVDQArm  },
+  { X86::MOVAPSrr,   X86::MOVAPDrr,  X86::MOVDQArr  },
+  { X86::MOVUPSmr,   X86::MOVUPDmr,  X86::MOVDQUmr  },
+  { X86::MOVUPSrm,   X86::MOVUPDrm,  X86::MOVDQUrm  },
+  { X86::MOVNTPSmr,  X86::MOVNTPDmr, X86::MOVNTDQmr },
+  { X86::ANDNPSrm,   X86::ANDNPDrm,  X86::PANDNrm   },
+  { X86::ANDNPSrr,   X86::ANDNPDrr,  X86::PANDNrr   },
+  { X86::ANDPSrm,    X86::ANDPDrm,   X86::PANDrm    },
+  { X86::ANDPSrr,    X86::ANDPDrr,   X86::PANDrr    },
+  { X86::ORPSrm,     X86::ORPDrm,    X86::PORrm     },
+  { X86::ORPSrr,     X86::ORPDrr,    X86::PORrr     },
+  { X86::V_SET0PS,   X86::V_SET0PD,  X86::V_SET0PI  },
+  { X86::XORPSrm,    X86::XORPDrm,   X86::PXORrm    },
+  { X86::XORPSrr,    X86::XORPDrr,   X86::PXORrr    },
+};
+
+// FIXME: Some shuffle and unpack instructions have equivalents in different
+// domains, but they require a bit more work than just switching opcodes.
+
+static const unsigned *lookup(unsigned opcode, unsigned domain) {
+  for (unsigned i = 0, e = array_lengthof(ReplaceableInstrs); i != e; ++i)
+    if (ReplaceableInstrs[i][domain-1] == opcode)
+      return ReplaceableInstrs[i];
+  return 0;
+}
+
+std::pair<uint16_t, uint16_t>
+X86InstrInfo::GetSSEDomain(const MachineInstr *MI) const {
+  uint16_t domain = (MI->getDesc().TSFlags >> X86II::SSEDomainShift) & 3;
+  return std::make_pair(domain,
+                        domain && lookup(MI->getOpcode(), domain) ? 0xe : 0);
+}
+
+void X86InstrInfo::SetSSEDomain(MachineInstr *MI, unsigned Domain) const {
+  assert(Domain>0 && Domain<4 && "Invalid execution domain");
+  uint16_t dom = (MI->getDesc().TSFlags >> X86II::SSEDomainShift) & 3;
+  assert(dom && "Not an SSE instruction");
+  const unsigned *table = lookup(MI->getOpcode(), dom);
+  assert(table && "Cannot change domain");
+  MI->setDesc(get(table[Domain-1]));
+}
+
+/// getNoopForMachoTarget - Return the noop instruction to use for a noop.
+void X86InstrInfo::getNoopForMachoTarget(MCInst &NopInst) const {
+  NopInst.setOpcode(X86::NOOP);
+}
+

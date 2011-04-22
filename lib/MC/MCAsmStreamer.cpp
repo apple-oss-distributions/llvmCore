@@ -16,6 +16,7 @@
 #include "llvm/MC/MCInstPrinter.h"
 #include "llvm/MC/MCSectionMachO.h"
 #include "llvm/MC/MCSymbol.h"
+#include "llvm/ADT/OwningPtr.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/Twine.h"
 #include "llvm/Support/ErrorHandling.h"
@@ -29,7 +30,7 @@ namespace {
 class MCAsmStreamer : public MCStreamer {
   formatted_raw_ostream &OS;
   const MCAsmInfo &MAI;
-  MCInstPrinter *InstPrinter;
+  OwningPtr<MCInstPrinter> InstPrinter;
   MCCodeEmitter *Emitter;
   
   SmallString<128> CommentToEmit;
@@ -67,6 +68,9 @@ public:
   /// isVerboseAsm - Return true if this streamer supports verbose assembly at
   /// all.
   virtual bool isVerboseAsm() const { return IsVerboseAsm; }
+  
+  /// hasRawTextSupport - We support EmitRawText.
+  virtual bool hasRawTextSupport() const { return true; }
 
   /// AddComment - Add a comment that can be emitted to the generated .s
   /// file if applicable as a QoI issue to make the output of the compiler
@@ -105,7 +109,10 @@ public:
   virtual void EmitSymbolAttribute(MCSymbol *Symbol, MCSymbolAttr Attribute);
 
   virtual void EmitSymbolDesc(MCSymbol *Symbol, unsigned DescValue);
-
+  virtual void BeginCOFFSymbolDef(const MCSymbol *Symbol);
+  virtual void EmitCOFFSymbolStorageClass(int StorageClass);
+  virtual void EmitCOFFSymbolType(int Type);
+  virtual void EndCOFFSymbolDef();
   virtual void EmitELFSize(MCSymbol *Symbol, const MCExpr *Value);
   virtual void EmitCommonSymbol(MCSymbol *Symbol, uint64_t Size,
                                 unsigned ByteAlignment);
@@ -119,6 +126,9 @@ public:
   virtual void EmitZerofill(const MCSection *Section, MCSymbol *Symbol = 0,
                             unsigned Size = 0, unsigned ByteAlignment = 0);
 
+  virtual void EmitTBSSSymbol (const MCSection *Section, MCSymbol *Symbol,
+                               uint64_t Size, unsigned ByteAlignment = 0);
+                               
   virtual void EmitBytes(StringRef Data, unsigned AddrSpace);
 
   virtual void EmitValue(const MCExpr *Value, unsigned Size,unsigned AddrSpace);
@@ -143,6 +153,11 @@ public:
   virtual void EmitDwarfFileDirective(unsigned FileNo, StringRef Filename);
 
   virtual void EmitInstruction(const MCInst &Inst);
+  
+  /// EmitRawText - If this file is backed by a assembly streamer, this dumps
+  /// the specified string in the output .s file.  This capability is
+  /// indicated by the hasRawTextSupport() predicate.
+  virtual void EmitRawText(StringRef String);
   
   virtual void Finish();
   
@@ -194,7 +209,6 @@ void MCAsmStreamer::EmitCommentsAndEOL() {
   CommentStream.resync();
 }
 
-
 static inline int64_t truncateToSize(int64_t Value, unsigned Bytes) {
   assert(Bytes && "Invalid size!");
   return Value & ((uint64_t) (int64_t) -1 >> (64 - Bytes * 8));
@@ -210,6 +224,7 @@ void MCAsmStreamer::SwitchSection(const MCSection *Section) {
 
 void MCAsmStreamer::EmitLabel(MCSymbol *Symbol) {
   assert(Symbol->isUndefined() && "Cannot define a symbol twice!");
+  assert(!Symbol->isVariable() && "Cannot emit a variable symbol!");
   assert(CurSection && "Cannot emit before setting section!");
 
   OS << *Symbol << ":";
@@ -226,16 +241,11 @@ void MCAsmStreamer::EmitAssemblerFlag(MCAssemblerFlag Flag) {
 }
 
 void MCAsmStreamer::EmitAssignment(MCSymbol *Symbol, const MCExpr *Value) {
-  // Only absolute symbols can be redefined.
-  assert((Symbol->isUndefined() || Symbol->isAbsolute()) &&
-         "Cannot define a symbol twice!");
-
   OS << *Symbol << " = " << *Value;
   EmitEOL();
 
   // FIXME: Lift context changes into super class.
-  // FIXME: Set associated section.
-  Symbol->setValue(Value);
+  Symbol->setVariableValue(Value);
 }
 
 void MCAsmStreamer::EmitSymbolAttribute(MCSymbol *Symbol,
@@ -289,6 +299,26 @@ void MCAsmStreamer::EmitSymbolDesc(MCSymbol *Symbol, unsigned DescValue) {
   EmitEOL();
 }
 
+void MCAsmStreamer::BeginCOFFSymbolDef(const MCSymbol *Symbol) {
+  OS << "\t.def\t " << *Symbol << ';';
+  EmitEOL();
+}
+
+void MCAsmStreamer::EmitCOFFSymbolStorageClass (int StorageClass) {
+  OS << "\t.scl\t" << StorageClass << ';';
+  EmitEOL();
+}
+
+void MCAsmStreamer::EmitCOFFSymbolType (int Type) {
+  OS << "\t.type\t" << Type << ';';
+  EmitEOL();
+}
+
+void MCAsmStreamer::EndCOFFSymbolDef() {
+  OS << "\t.endef";
+  EmitEOL();
+}
+
 void MCAsmStreamer::EmitELFSize(MCSymbol *Symbol, const MCExpr *Value) {
   assert(MAI.hasDotTypeDotSizeDirective());
   OS << "\t.size\t" << *Symbol << ", " << *Value << '\n';
@@ -330,6 +360,23 @@ void MCAsmStreamer::EmitZerofill(const MCSection *Section, MCSymbol *Symbol,
     if (ByteAlignment != 0)
       OS << ',' << Log2_32(ByteAlignment);
   }
+  EmitEOL();
+}
+
+// .tbss sym, size, align
+// This depends that the symbol has already been mangled from the original,
+// e.g. _a.
+void MCAsmStreamer::EmitTBSSSymbol(const MCSection *Section, MCSymbol *Symbol,
+                                   uint64_t Size, unsigned ByteAlignment) {
+  assert(Symbol != NULL && "Symbol shouldn't be NULL!");
+  // Instead of using the Section we'll just use the shortcut.
+  // This is a mach-o specific directive and section.
+  OS << ".tbss " << *Symbol << ", " << Size;
+  
+  // Output align if we have it.  We default to 1 so don't bother printing
+  // that.
+  if (ByteAlignment > 1) OS << ", " << Log2_32(ByteAlignment);
+  
   EmitEOL();
 }
 
@@ -622,28 +669,24 @@ void MCAsmStreamer::EmitInstruction(const MCInst &Inst) {
     AddEncodingComment(Inst);
 
   // Show the MCInst if enabled.
-  if (ShowInst) {
-    raw_ostream &OS = GetCommentOS();
-    OS << "<MCInst #" << Inst.getOpcode();
-    
-    StringRef InstName;
-    if (InstPrinter)
-      InstName = InstPrinter->getOpcodeName(Inst.getOpcode());
-    if (!InstName.empty())
-      OS << ' ' << InstName;
-    
-    for (unsigned i = 0, e = Inst.getNumOperands(); i != e; ++i) {
-      OS << "\n  ";
-      Inst.getOperand(i).print(OS, &MAI);
-    }
-    OS << ">\n";
-  }
+  if (ShowInst)
+    Inst.dump_pretty(GetCommentOS(), &MAI, InstPrinter.get(), "\n ");
   
-  // If we have an AsmPrinter, use that to print, otherwise dump the MCInst.
+  // If we have an AsmPrinter, use that to print, otherwise print the MCInst.
   if (InstPrinter)
-    InstPrinter->printInst(&Inst);
+    InstPrinter->printInst(&Inst, OS);
   else
     Inst.print(OS, &MAI);
+  EmitEOL();
+}
+
+/// EmitRawText - If this file is backed by a assembly streamer, this dumps
+/// the specified string in the output .s file.  This capability is
+/// indicated by the hasRawTextSupport() predicate.
+void MCAsmStreamer::EmitRawText(StringRef String) {
+  if (!String.empty() && String.back() == '\n')
+    String = String.substr(0, String.size()-1);
+  OS << String;
   EmitEOL();
 }
 

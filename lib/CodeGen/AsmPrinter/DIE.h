@@ -22,8 +22,6 @@
 
 namespace llvm {
   class AsmPrinter;
-  class DwarfPrinter;
-  class TargetData;
   class MCSymbol;
   class raw_ostream;
 
@@ -101,7 +99,7 @@ namespace llvm {
 
     /// Emit - Print the abbreviation using the specified asm printer.
     ///
-    void Emit(const DwarfPrinter *DP) const;
+    void Emit(AsmPrinter *AP) const;
 
 #ifndef NDEBUG
     void print(raw_ostream &O);
@@ -153,7 +151,7 @@ namespace llvm {
     unsigned getOffset() const { return Offset; }
     unsigned getSize() const { return Size; }
     const std::vector<DIE *> &getChildren() const { return Children; }
-    SmallVector<DIEValue*, 32> &getValues() { return Values; }
+    const SmallVector<DIEValue*, 32> &getValues() const { return Values; }
     DIE *getParent() const { return Parent; }
     void setTag(unsigned Tag) { Abbrev.setTag(Tag); }
     void setOffset(unsigned O) { Offset = O; }
@@ -171,8 +169,10 @@ namespace llvm {
     unsigned getSiblingOffset() const { return Offset + Size; }
 
     /// addSiblingOffset - Add a sibling offset field to the front of the DIE.
+    /// The caller is responsible for deleting the return value at or after the
+    /// same time it destroys this DIE.
     ///
-    void addSiblingOffset();
+    DIEValue *addSiblingOffset(BumpPtrAllocator &A);
 
     /// addChild - Add a child to the DIE.
     ///
@@ -219,11 +219,11 @@ namespace llvm {
 
     /// EmitValue - Emit value via the Dwarf writer.
     ///
-    virtual void EmitValue(DwarfPrinter *D, unsigned Form) const = 0;
+    virtual void EmitValue(AsmPrinter *AP, unsigned Form) const = 0;
 
     /// SizeOf - Return the size of a value in bytes.
     ///
-    virtual unsigned SizeOf(const TargetData *TD, unsigned Form) const = 0;
+    virtual unsigned SizeOf(AsmPrinter *AP, unsigned Form) const = 0;
 
     // Implement isa/cast/dyncast.
     static bool classof(const DIEValue *) { return true; }
@@ -259,12 +259,13 @@ namespace llvm {
 
     /// EmitValue - Emit integer of appropriate size.
     ///
-    virtual void EmitValue(DwarfPrinter *D, unsigned Form) const;
+    virtual void EmitValue(AsmPrinter *AP, unsigned Form) const;
+
+    uint64_t getValue() const { return Integer; }
 
     /// SizeOf - Determine size of integer value in bytes.
     ///
-    virtual unsigned SizeOf(const TargetData *TD, unsigned Form) const;
-
+    virtual unsigned SizeOf(AsmPrinter *AP, unsigned Form) const;
 
     // Implement isa/cast/dyncast.
     static bool classof(const DIEInteger *) { return true; }
@@ -285,11 +286,11 @@ namespace llvm {
 
     /// EmitValue - Emit string value.
     ///
-    virtual void EmitValue(DwarfPrinter *D, unsigned Form) const;
+    virtual void EmitValue(AsmPrinter *AP, unsigned Form) const;
 
     /// SizeOf - Determine size of string value in bytes.
     ///
-    virtual unsigned SizeOf(const TargetData *, unsigned /*Form*/) const {
+    virtual unsigned SizeOf(AsmPrinter *AP, unsigned /*Form*/) const {
       return Str.size() + sizeof(char); // sizeof('\0');
     }
 
@@ -312,11 +313,11 @@ namespace llvm {
 
     /// EmitValue - Emit label value.
     ///
-    virtual void EmitValue(DwarfPrinter *D, unsigned Form) const;
+    virtual void EmitValue(AsmPrinter *AP, unsigned Form) const;
 
     /// SizeOf - Determine size of label value in bytes.
     ///
-    virtual unsigned SizeOf(const TargetData *TD, unsigned Form) const;
+    virtual unsigned SizeOf(AsmPrinter *AP, unsigned Form) const;
 
     // Implement isa/cast/dyncast.
     static bool classof(const DIELabel *)  { return true; }
@@ -339,11 +340,11 @@ namespace llvm {
 
     /// EmitValue - Emit delta value.
     ///
-    virtual void EmitValue(DwarfPrinter *D, unsigned Form) const;
+    virtual void EmitValue(AsmPrinter *AP, unsigned Form) const;
 
     /// SizeOf - Determine size of delta value in bytes.
     ///
-    virtual unsigned SizeOf(const TargetData *TD, unsigned Form) const;
+    virtual unsigned SizeOf(AsmPrinter *AP, unsigned Form) const;
 
     // Implement isa/cast/dyncast.
     static bool classof(const DIEDelta *)  { return true; }
@@ -367,11 +368,11 @@ namespace llvm {
 
     /// EmitValue - Emit debug information entry offset.
     ///
-    virtual void EmitValue(DwarfPrinter *D, unsigned Form) const;
+    virtual void EmitValue(AsmPrinter *AP, unsigned Form) const;
 
     /// SizeOf - Determine size of debug information entry in bytes.
     ///
-    virtual unsigned SizeOf(const TargetData *TD, unsigned Form) const {
+    virtual unsigned SizeOf(AsmPrinter *AP, unsigned Form) const {
       return sizeof(int32_t);
     }
 
@@ -396,7 +397,7 @@ namespace llvm {
 
     /// ComputeSize - calculate the size of the block.
     ///
-    unsigned ComputeSize(const TargetData *TD);
+    unsigned ComputeSize(AsmPrinter *AP);
 
     /// BestForm - Choose the best form for data.
     ///
@@ -409,11 +410,11 @@ namespace llvm {
 
     /// EmitValue - Emit block data.
     ///
-    virtual void EmitValue(DwarfPrinter *D, unsigned Form) const;
+    virtual void EmitValue(AsmPrinter *AP, unsigned Form) const;
 
     /// SizeOf - Determine size of block data in bytes.
     ///
-    virtual unsigned SizeOf(const TargetData *TD, unsigned Form) const;
+    virtual unsigned SizeOf(AsmPrinter *AP, unsigned Form) const;
 
     // Implement isa/cast/dyncast.
     static bool classof(const DIEBlock *)  { return true; }

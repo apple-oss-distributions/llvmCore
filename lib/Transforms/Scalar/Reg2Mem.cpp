@@ -45,11 +45,12 @@ namespace {
 
    bool valueEscapes(const Instruction *Inst) const {
      const BasicBlock *BB = Inst->getParent();
-      for (Value::use_const_iterator UI = Inst->use_begin(),E = Inst->use_end();
-           UI != E; ++UI)
-        if (cast<Instruction>(*UI)->getParent() != BB ||
-            isa<PHINode>(*UI))
+      for (Value::const_use_iterator UI = Inst->use_begin(),E = Inst->use_end();
+           UI != E; ++UI) {
+        const Instruction *I = cast<Instruction>(*UI);
+        if (I->getParent() != BB || isa<PHINode>(I))
           return true;
+      }
       return false;
     }
 

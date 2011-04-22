@@ -21,7 +21,7 @@
 #include "llvm/Target/TargetRegistry.h"
 using namespace llvm;
 
-static const MCAsmInfo *createMCAsmInfo(const Target &T, StringRef TT) {
+static MCAsmInfo *createMCAsmInfo(const Target &T, StringRef TT) {
   Triple TheTriple(TT);
   switch (TheTriple.getOS()) {
   case Triple::Darwin:
@@ -62,7 +62,8 @@ ARMTargetMachine::ARMTargetMachine(const Target &T, const std::string &TT,
     DataLayout(Subtarget.isAPCS_ABI() ?
                std::string("e-p:32:32-f64:32:32-i64:32:32-n32") :
                std::string("e-p:32:32-f64:64:64-i64:64:64-n32")),
-    TLInfo(*this) {
+    TLInfo(*this),
+    TSInfo(*this) {
 }
 
 ThumbTargetMachine::ThumbTargetMachine(const Target &T, const std::string &TT,
@@ -76,7 +77,8 @@ ThumbTargetMachine::ThumbTargetMachine(const Target &T, const std::string &TT,
                            "i16:16:32-i8:8:32-i1:8:32-a:0:32-n32") :
                std::string("e-p:32:32-f64:64:64-i64:64:64-"
                            "i16:16:32-i8:8:32-i1:8:32-a:0:32-n32")),
-    TLInfo(*this) {
+    TLInfo(*this),
+    TSInfo(*this) {
 }
 
 
@@ -102,8 +104,12 @@ bool ARMBaseTargetMachine::addPreRegAlloc(PassManagerBase &PM,
 bool ARMBaseTargetMachine::addPreSched2(PassManagerBase &PM,
                                         CodeGenOpt::Level OptLevel) {
   // FIXME: temporarily disabling load / store optimization pass for Thumb1.
-  if (OptLevel != CodeGenOpt::None && !Subtarget.isThumb1Only())
-    PM.add(createARMLoadStoreOptimizationPass());
+  if (OptLevel != CodeGenOpt::None) {
+    if (!Subtarget.isThumb1Only())
+      PM.add(createARMLoadStoreOptimizationPass());
+    if (Subtarget.hasNEON())
+      PM.add(createNEONMoveFixPass());
+  }
 
   // Expand some pseudo instructions into multiple instructions to allow
   // proper scheduling.
@@ -118,8 +124,6 @@ bool ARMBaseTargetMachine::addPreEmitPass(PassManagerBase &PM,
   if (OptLevel != CodeGenOpt::None) {
     if (!Subtarget.isThumb1Only())
       PM.add(createIfConverterPass());
-    if (Subtarget.hasNEON())
-      PM.add(createNEONMoveFixPass());
   }
 
   if (Subtarget.isThumb2()) {

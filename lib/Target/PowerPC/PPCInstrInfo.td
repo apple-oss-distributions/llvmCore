@@ -111,9 +111,11 @@ def callseq_end   : SDNode<"ISD::CALLSEQ_END",   SDT_PPCCallSeqEnd,
 
 def SDT_PPCCall   : SDTypeProfile<0, -1, [SDTCisInt<0>]>;
 def PPCcall_Darwin : SDNode<"PPCISD::CALL_Darwin", SDT_PPCCall,
-                            [SDNPHasChain, SDNPOptInFlag, SDNPOutFlag]>;
+                            [SDNPHasChain, SDNPOptInFlag, SDNPOutFlag,
+                             SDNPVariadic]>;
 def PPCcall_SVR4  : SDNode<"PPCISD::CALL_SVR4", SDT_PPCCall,
-                           [SDNPHasChain, SDNPOptInFlag, SDNPOutFlag]>;
+                           [SDNPHasChain, SDNPOptInFlag, SDNPOutFlag,
+                            SDNPVariadic]>;
 def PPCnop : SDNode<"PPCISD::NOP", SDT_PPCnop, [SDNPInFlag, SDNPOutFlag]>;
 def PPCload   : SDNode<"PPCISD::LOAD", SDTypeProfile<1, 1, []>,
                        [SDNPHasChain, SDNPOptInFlag, SDNPOutFlag]>;
@@ -124,16 +126,18 @@ def PPCtoc_restore : SDNode<"PPCISD::TOC_RESTORE", SDTypeProfile<0, 0, []>,
 def PPCmtctr      : SDNode<"PPCISD::MTCTR", SDT_PPCCall,
                            [SDNPHasChain, SDNPOptInFlag, SDNPOutFlag]>;
 def PPCbctrl_Darwin  : SDNode<"PPCISD::BCTRL_Darwin", SDTNone,
-                              [SDNPHasChain, SDNPOptInFlag, SDNPOutFlag]>;
+                              [SDNPHasChain, SDNPOptInFlag, SDNPOutFlag,
+                               SDNPVariadic]>;
 
 def PPCbctrl_SVR4  : SDNode<"PPCISD::BCTRL_SVR4", SDTNone,
-                            [SDNPHasChain, SDNPOptInFlag, SDNPOutFlag]>;
+                            [SDNPHasChain, SDNPOptInFlag, SDNPOutFlag,
+                             SDNPVariadic]>;
 
 def retflag       : SDNode<"PPCISD::RET_FLAG", SDTNone,
-                           [SDNPHasChain, SDNPOptInFlag]>;
+                           [SDNPHasChain, SDNPOptInFlag, SDNPVariadic]>;
 
 def PPCtc_return : SDNode<"PPCISD::TC_RETURN", SDT_PPCTC_ret,
-                        [SDNPHasChain,  SDNPOptInFlag]>;
+                        [SDNPHasChain,  SDNPOptInFlag, SDNPVariadic]>;
 
 def PPCvcmp       : SDNode<"PPCISD::VCMP" , SDT_PPCvcmp, []>;
 def PPCvcmp_o     : SDNode<"PPCISD::VCMPo", SDT_PPCvcmp, [SDNPOutFlag]>;
@@ -658,7 +662,7 @@ def STWCX : XForm_1<31, 150, (outs), (ins GPRC:$rS, memrr:$dst),
                    [(PPCstcx GPRC:$rS, xoaddr:$dst)]>,
                    isDOT;
 
-let isBarrier = 1, hasCtrlDep = 1 in
+let isTerminator = 1, isBarrier = 1, hasCtrlDep = 1 in
 def TRAP  : XForm_24<31, 4, (outs), (ins), "trap", LdStGeneral, [(trap)]>;
 
 //===----------------------------------------------------------------------===//
@@ -858,7 +862,6 @@ def STFDX : XForm_28<31, 727, (outs), (ins F8RC:$frS, memrr:$dst),
                      [(store F8RC:$frS, xaddr:$dst)]>;
 }
 
-let isBarrier = 1 in
 def SYNC : XForm_24_sync<31, 598, (outs), (ins),
                         "sync", LdStSync,
                         [(int_ppc_sync)]>;

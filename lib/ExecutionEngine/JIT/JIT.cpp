@@ -19,7 +19,6 @@
 #include "llvm/GlobalVariable.h"
 #include "llvm/Instructions.h"
 #include "llvm/ADT/SmallPtrSet.h"
-#include "llvm/ModuleProvider.h"
 #include "llvm/CodeGen/JITCodeEmitter.h"
 #include "llvm/CodeGen/MachineCodeInfo.h"
 #include "llvm/ExecutionEngine/GenericValue.h"
@@ -193,15 +192,6 @@ void DarwinRegisterFrame(void* FrameBegin) {
 #endif // __APPLE__
 #endif // __GNUC__
 
-ExecutionEngine *ExecutionEngine::createJIT(ModuleProvider *MP,
-                                            std::string *ErrorStr,
-                                            JITMemoryManager *JMM,
-                                            CodeGenOpt::Level OptLevel,
-                                            bool GVsWithCode,
-					    CodeModel::Model CMM) {
-  return createJIT(MP->getModule(), ErrorStr, JMM, OptLevel, GVsWithCode, CMM);
-}
-
 /// createJIT - This is the factory method for creating a JIT for the current
 /// machine, it does not fall back to the interpreter.  This takes ownership
 /// of the module.
@@ -314,7 +304,7 @@ JIT::JIT(Module *M, TargetMachine &tm, TargetJITInfo &tji,
   // Turn the machine code intermediate representation into bytes in memory that
   // may be executed.
   if (TM.addPassesToEmitMachineCode(PM, *JCE, OptLevel)) {
-    llvm_report_error("Target does not support machine code emission!");
+    report_fatal_error("Target does not support machine code emission!");
   }
   
   // Register routine for informing unwinding runtime about new EH frames
@@ -362,7 +352,7 @@ void JIT::addModule(Module *M) {
     // Turn the machine code intermediate representation into bytes in memory
     // that may be executed.
     if (TM.addPassesToEmitMachineCode(PM, *JCE, CodeGenOpt::Default)) {
-      llvm_report_error("Target does not support machine code emission!");
+      report_fatal_error("Target does not support machine code emission!");
     }
     
     // Initialize passes.
@@ -393,7 +383,7 @@ bool JIT::removeModule(Module *M) {
     // Turn the machine code intermediate representation into bytes in memory
     // that may be executed.
     if (TM.addPassesToEmitMachineCode(PM, *JCE, CodeGenOpt::Default)) {
-      llvm_report_error("Target does not support machine code emission!");
+      report_fatal_error("Target does not support machine code emission!");
     }
     
     // Initialize passes.
@@ -659,11 +649,6 @@ void JIT::runJITOnFunctionUnlocked(Function *F, const MutexGuard &locked) {
     // the stub with real address of the function.
     updateFunctionStub(PF);
   }
-  
-  // If the JIT is configured to emit info so that dlsym can be used to
-  // rewrite stubs to external globals, do so now.
-  if (areDlsymStubsEnabled() && !isCompilingLazily())
-    updateDlsymStubTable();
 }
 
 /// getPointerToFunction - This method is used to get the address of the
@@ -680,7 +665,7 @@ void *JIT::getPointerToFunction(Function *F) {
   // exists in this Module.
   std::string ErrorMsg;
   if (F->Materialize(&ErrorMsg)) {
-    llvm_report_error("Error reading function '" + F->getName()+
+    report_fatal_error("Error reading function '" + F->getName()+
                       "' from bitcode file: " + ErrorMsg);
   }
 
@@ -689,8 +674,7 @@ void *JIT::getPointerToFunction(Function *F) {
     return Addr;
 
   if (F->isDeclaration() || F->hasAvailableExternallyLinkage()) {
-    bool AbortOnFailure =
-      !areDlsymStubsEnabled() && !F->hasExternalWeakLinkage();
+    bool AbortOnFailure = !F->hasExternalWeakLinkage();
     void *Addr = getPointerToNamedFunction(F->getName(), AbortOnFailure);
     addGlobalMapping(F, Addr);
     return Addr;
@@ -719,8 +703,8 @@ void *JIT::getOrEmitGlobalVariable(const GlobalVariable *GV) {
       return (void*)&__dso_handle;
 #endif
     Ptr = sys::DynamicLibrary::SearchForAddressOfSymbol(GV->getName());
-    if (Ptr == 0 && !areDlsymStubsEnabled()) {
-      llvm_report_error("Could not resolve external global address: "
+    if (Ptr == 0) {
+      report_fatal_error("Could not resolve external global address: "
                         +GV->getName());
     }
     addGlobalMapping(GV, Ptr);
@@ -770,7 +754,7 @@ char* JIT::getMemoryForGV(const GlobalVariable* GV) {
   // situation. It's returned in the same block of memory as code which may
   // not be writable.
   if (isGVCompilationDisabled() && !GV->isConstant()) {
-    llvm_report_error("Compilation of non-internal GlobalValue is disabled!");
+    report_fatal_error("Compilation of non-internal GlobalValue is disabled!");
   }
 
   // Some applications require globals and code to live together, so they may

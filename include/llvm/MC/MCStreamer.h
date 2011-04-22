@@ -27,7 +27,7 @@ namespace llvm {
   class MCSection;
   class MCSymbol;
   class StringRef;
-class TargetAsmBackend;
+  class TargetAsmBackend;
   class Twine;
   class raw_ostream;
   class formatted_raw_ostream;
@@ -62,9 +62,13 @@ class TargetAsmBackend;
     /// @name Assembly File Formatting.
     /// @{
     
-    /// isVerboseAsm - Return true if this streamer supports verbose assembly at
-    /// all.
+    /// isVerboseAsm - Return true if this streamer supports verbose assembly
+    /// and if it is enabled.
     virtual bool isVerboseAsm() const { return false; }
+    
+    /// hasRawTextSupport - Return true if this asm streamer supports emitting
+    /// unformatted text to the .s file with EmitRawText.
+    virtual bool hasRawTextSupport() const { return false; }
 
     /// AddComment - Add a comment that can be emitted to the generated .s
     /// file if applicable as a QoI issue to make the output of the compiler
@@ -88,7 +92,7 @@ class TargetAsmBackend;
     /// @name Symbol & Section Management
     /// @{
     
-    /// getCurrentSection - Return the current seciton that the streamer is
+    /// getCurrentSection - Return the current section that the streamer is
     /// emitting code to.
     const MCSection *getCurrentSection() const { return CurSection; }
 
@@ -134,7 +138,24 @@ class TargetAsmBackend;
     /// @param DescValue - The value to set into the n_desc field.
     virtual void EmitSymbolDesc(MCSymbol *Symbol, unsigned DescValue) = 0;
 
-    
+    /// BeginCOFFSymbolDef - Start emitting COFF symbol definition
+    ///
+    /// @param Symbol - The symbol to have its External & Type fields set.
+    virtual void BeginCOFFSymbolDef(const MCSymbol *Symbol) = 0;
+
+    /// EmitCOFFSymbolStorageClass - Emit the storage class of the symbol.
+    ///
+    /// @param StorageClass - The storage class the symbol should have.
+    virtual void EmitCOFFSymbolStorageClass(int StorageClass) = 0;
+
+    /// EmitCOFFSymbolType - Emit the type of the symbol.
+    ///
+    /// @param Type - A COFF type identifier (see COFF::SymbolType in X86COFF.h)
+    virtual void EmitCOFFSymbolType(int Type) = 0;
+
+    /// EndCOFFSymbolDef - Marks the end of the symbol definition.
+    virtual void EndCOFFSymbolDef() = 0;
+
     /// EmitELFSize - Emit an ELF .size directive.
     ///
     /// This corresponds to an assembler statement such as:
@@ -167,6 +188,15 @@ class TargetAsmBackend;
     virtual void EmitZerofill(const MCSection *Section, MCSymbol *Symbol = 0,
                               unsigned Size = 0,unsigned ByteAlignment = 0) = 0;
 
+    /// EmitTBSSSymbol - Emit a thread local bss (.tbss) symbol.
+    ///
+    /// @param Section - The thread local common section.
+    /// @param Symbol - The thread local common symbol to emit.
+    /// @param Size - The size of the symbol.
+    /// @param ByteAlignment - The alignment of the thread local common symbol
+    /// if non-zero.  This must be a power of 2 on some targets.
+    virtual void EmitTBSSSymbol(const MCSection *Section, MCSymbol *Symbol,
+                                uint64_t Size, unsigned ByteAlignment = 0) = 0;
     /// @}
     /// @name Generating Data
     /// @{
@@ -278,6 +308,12 @@ class TargetAsmBackend;
     /// section.
     virtual void EmitInstruction(const MCInst &Inst) = 0;
 
+    /// EmitRawText - If this file is backed by a assembly streamer, this dumps
+    /// the specified string in the output .s file.  This capability is
+    /// indicated by the hasRawTextSupport() predicate.  By default this aborts.
+    virtual void EmitRawText(StringRef String);
+    void EmitRawText(const Twine &String);
+    
     /// Finish - Finish emission of machine code and flush any output.
     virtual void Finish() = 0;
   };
@@ -291,7 +327,8 @@ class TargetAsmBackend;
   /// assembler.
   ///
   /// \param InstPrint - If given, the instruction printer to use. If not given
-  /// the MCInst representation will be printed.
+  /// the MCInst representation will be printed.  This method takes ownership of
+  /// InstPrint.
   ///
   /// \param CE - If given, a code emitter to use to show the instruction
   /// encoding inline with the assembly.
@@ -307,7 +344,8 @@ class TargetAsmBackend;
   /// createMachOStream - Create a machine code streamer which will generative
   /// Mach-O format object files.
   MCStreamer *createMachOStreamer(MCContext &Ctx, TargetAsmBackend &TAB,
-                                  raw_ostream &OS, MCCodeEmitter *CE);
+                                  raw_ostream &OS, MCCodeEmitter *CE,
+                                  bool RelaxAll = false);
 
 } // end namespace llvm
 

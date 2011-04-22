@@ -46,12 +46,12 @@ namespace {
 /// Utility class for spillers.
 class SpillerBase : public Spiller {
 protected:
-
   MachineFunction *mf;
   LiveIntervals *lis;
   MachineFrameInfo *mfi;
   MachineRegisterInfo *mri;
   const TargetInstrInfo *tii;
+  const TargetRegisterInfo *tri;
   VirtRegMap *vrm;
   
   /// Construct a spiller base. 
@@ -61,6 +61,7 @@ protected:
     mfi = mf->getFrameInfo();
     mri = &mf->getRegInfo();
     tii = mf->getTarget().getInstrInfo();
+    tri = mf->getTarget().getRegisterInfo();
   }
 
   /// Add spill ranges for every use/def of the live interval, inserting loads
@@ -130,7 +131,8 @@ protected:
       // Insert reload if necessary.
       MachineBasicBlock::iterator miItr(mi);
       if (hasUse) {
-        tii->loadRegFromStackSlot(*mi->getParent(), miItr, newVReg, ss, trc);
+        tii->loadRegFromStackSlot(*mi->getParent(), miItr, newVReg, ss, trc,
+                                  tri);
         MachineInstr *loadInstr(prior(miItr));
         SlotIndex loadIndex =
           lis->InsertMachineInstrInMaps(loadInstr).getDefIndex();
@@ -143,8 +145,8 @@ protected:
 
       // Insert store if necessary.
       if (hasDef) {
-        tii->storeRegToStackSlot(*mi->getParent(), llvm::next(miItr), newVReg, true,
-                                 ss, trc);
+        tii->storeRegToStackSlot(*mi->getParent(), llvm::next(miItr), newVReg,
+                                 true, ss, trc, tri);
         MachineInstr *storeInstr(llvm::next(miItr));
         SlotIndex storeIndex =
           lis->InsertMachineInstrInMaps(storeInstr).getDefIndex();
@@ -160,9 +162,11 @@ protected:
 
     return added;
   }
-
 };
 
+} // end anonymous namespace
+
+namespace {
 
 /// Spills any live range using the spill-everywhere method with no attempt at
 /// folding.
@@ -178,8 +182,11 @@ public:
     // Ignore spillIs - we don't use it.
     return trivialSpillEverywhere(li);
   }
-
 };
+
+} // end anonymous namespace
+
+namespace {
 
 /// Falls back on LiveIntervals::addIntervalsForSpills.
 class StandardSpiller : public Spiller {
@@ -198,8 +205,11 @@ public:
                                    SlotIndex*) {
     return lis->addIntervalsForSpills(*li, spillIs, loopInfo, *vrm);
   }
-
 };
+
+} // end anonymous namespace
+
+namespace {
 
 /// When a call to spill is placed this spiller will first try to break the
 /// interval up into its component values (one new interval per value).
@@ -326,7 +336,8 @@ private:
       // Insert a copy at the start of the MBB. The range proceeding the
       // copy will be attached to the original LiveInterval.
       MachineBasicBlock *defMBB = lis->getMBBFromIndex(newVNI->def);
-      tii->copyRegToReg(*defMBB, defMBB->begin(), newVReg, li->reg, trc, trc);
+      tii->copyRegToReg(*defMBB, defMBB->begin(), newVReg, li->reg, trc, trc,
+                        DebugLoc());
       MachineInstr *copyMI = defMBB->begin();
       copyMI->addRegisterKilled(li->reg, tri);
       SlotIndex copyIdx = lis->InsertMachineInstrInMaps(copyMI);
@@ -379,7 +390,8 @@ private:
 
       if (isTwoAddr && !twoAddrUseIsUndef) {
         MachineBasicBlock *defMBB = defInst->getParent();
-        tii->copyRegToReg(*defMBB, defInst, newVReg, li->reg, trc, trc);
+        tii->copyRegToReg(*defMBB, defInst, newVReg, li->reg, trc, trc,
+                          DebugLoc());
         MachineInstr *copyMI = prior(MachineBasicBlock::iterator(defInst));
         SlotIndex copyIdx = lis->InsertMachineInstrInMaps(copyMI);
         copyMI->addRegisterKilled(li->reg, tri);
@@ -439,8 +451,9 @@ private:
         // reg.
         MachineBasicBlock *useMBB = useInst->getParent();
         MachineBasicBlock::iterator useItr(useInst);
-        tii->copyRegToReg(*useMBB, next(useItr), li->reg, newVReg, trc, trc);
-        MachineInstr *copyMI = next(useItr);
+        tii->copyRegToReg(*useMBB, llvm::next(useItr), li->reg, newVReg, trc, trc,
+                          DebugLoc());
+        MachineInstr *copyMI = llvm::next(useItr);
         copyMI->addRegisterKilled(newVReg, tri);
         SlotIndex copyIdx = lis->InsertMachineInstrInMaps(copyMI);
 
@@ -476,7 +489,8 @@ private:
         assert(oldKillRange != 0 && "No kill range?");
 
         tii->copyRegToReg(*killMBB, killMBB->getFirstTerminator(),
-                          li->reg, newVReg, trc, trc);
+                          li->reg, newVReg, trc, trc,
+                          DebugLoc());
         MachineInstr *copyMI = prior(killMBB->getFirstTerminator());
         copyMI->addRegisterKilled(newVReg, tri);
         SlotIndex copyIdx = lis->InsertMachineInstrInMaps(copyMI);
@@ -513,15 +527,16 @@ private:
 
 };
 
-}
+} // end anonymous namespace
+
 
 llvm::Spiller* llvm::createSpiller(MachineFunction *mf, LiveIntervals *lis,
                                    const MachineLoopInfo *loopInfo,
                                    VirtRegMap *vrm) {
   switch (spillerOpt) {
-    case trivial: return new TrivialSpiller(mf, lis, vrm); break;
-    case standard: return new StandardSpiller(lis, loopInfo, vrm); break;
-    case splitting: return new SplittingSpiller(mf, lis, loopInfo, vrm); break;
-    default: llvm_unreachable("Unreachable!"); break;
+  default: assert(0 && "unknown spiller");
+  case trivial: return new TrivialSpiller(mf, lis, vrm);
+  case standard: return new StandardSpiller(lis, loopInfo, vrm);
+  case splitting: return new SplittingSpiller(mf, lis, loopInfo, vrm);
   }
 }

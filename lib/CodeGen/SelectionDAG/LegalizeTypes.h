@@ -32,8 +32,8 @@ namespace llvm {
 /// involves promoting small sizes to large sizes or splitting up large values
 /// into small values.
 ///
-class VISIBILITY_HIDDEN DAGTypeLegalizer {
-  TargetLowering &TLI;
+class LLVM_LIBRARY_VISIBILITY DAGTypeLegalizer {
+  const TargetLowering &TLI;
   SelectionDAG &DAG;
 public:
   // NodeIdFlags - This pass uses the NodeId on the SDNodes to hold information

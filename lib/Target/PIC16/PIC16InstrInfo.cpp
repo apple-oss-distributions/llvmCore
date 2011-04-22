@@ -70,15 +70,16 @@ unsigned PIC16InstrInfo::isLoadFromStackSlot(const MachineInstr *MI,
 void PIC16InstrInfo::storeRegToStackSlot(MachineBasicBlock &MBB, 
                                          MachineBasicBlock::iterator I,
                                          unsigned SrcReg, bool isKill, int FI,
-                                         const TargetRegisterClass *RC) const {
-  PIC16TargetLowering *PTLI = TM.getTargetLowering();
-  DebugLoc DL = DebugLoc::getUnknownLoc();
+                                         const TargetRegisterClass *RC,
+                                         const TargetRegisterInfo *TRI) const {
+  const PIC16TargetLowering *PTLI = TM.getTargetLowering();
+  DebugLoc DL;
   if (I != MBB.end()) DL = I->getDebugLoc();
 
   const Function *Func = MBB.getParent()->getFunction();
   const std::string FuncName = Func->getName();
 
-  const char *tmpName = createESName(PAN::getTempdataLabel(FuncName));
+  const char *tmpName = ESNames::createESName(PAN::getTempdataLabel(FuncName));
 
   // On the order of operands here: think "movwf SrcReg, tmp_slot, offset".
   if (RC == PIC16::GPRRegisterClass) {
@@ -86,7 +87,7 @@ void PIC16InstrInfo::storeRegToStackSlot(MachineBasicBlock &MBB,
     //MachineRegisterInfo &RI = MF.getRegInfo();
     BuildMI(MBB, I, DL, get(PIC16::movwf))
       .addReg(SrcReg, getKillRegState(isKill))
-      .addImm(PTLI->GetTmpOffsetForFI(FI, 1))
+      .addImm(PTLI->GetTmpOffsetForFI(FI, 1, *MBB.getParent()))
       .addExternalSymbol(tmpName)
       .addImm(1); // Emit banksel for it.
   }
@@ -101,7 +102,7 @@ void PIC16InstrInfo::storeRegToStackSlot(MachineBasicBlock &MBB,
                                                  : PIC16::save_fsr1;
     BuildMI(MBB, I, DL, get(opcode))
       .addReg(SrcReg, getKillRegState(isKill))
-      .addImm(PTLI->GetTmpOffsetForFI(FI, 3))
+      .addImm(PTLI->GetTmpOffsetForFI(FI, 3, *MBB.getParent()))
       .addExternalSymbol(tmpName)
       .addImm(1); // Emit banksel for it.
   }
@@ -112,22 +113,23 @@ void PIC16InstrInfo::storeRegToStackSlot(MachineBasicBlock &MBB,
 void PIC16InstrInfo::loadRegFromStackSlot(MachineBasicBlock &MBB, 
                                           MachineBasicBlock::iterator I,
                                           unsigned DestReg, int FI,
-                                          const TargetRegisterClass *RC) const {
-  PIC16TargetLowering *PTLI = TM.getTargetLowering();
-  DebugLoc DL = DebugLoc::getUnknownLoc();
+                                          const TargetRegisterClass *RC,
+                                          const TargetRegisterInfo *TRI) const {
+  const PIC16TargetLowering *PTLI = TM.getTargetLowering();
+  DebugLoc DL;
   if (I != MBB.end()) DL = I->getDebugLoc();
 
   const Function *Func = MBB.getParent()->getFunction();
   const std::string FuncName = Func->getName();
 
-  const char *tmpName = createESName(PAN::getTempdataLabel(FuncName));
+  const char *tmpName = ESNames::createESName(PAN::getTempdataLabel(FuncName));
 
   // On the order of operands here: think "movf FrameIndex, W".
   if (RC == PIC16::GPRRegisterClass) {
     //MachineFunction &MF = *MBB.getParent();
     //MachineRegisterInfo &RI = MF.getRegInfo();
     BuildMI(MBB, I, DL, get(PIC16::movf), DestReg)
-      .addImm(PTLI->GetTmpOffsetForFI(FI, 1))
+      .addImm(PTLI->GetTmpOffsetForFI(FI, 1, *MBB.getParent()))
       .addExternalSymbol(tmpName)
       .addImm(1); // Emit banksel for it.
   }
@@ -141,7 +143,7 @@ void PIC16InstrInfo::loadRegFromStackSlot(MachineBasicBlock &MBB,
     unsigned opcode = (DestReg == PIC16::FSR0) ? PIC16::restore_fsr0 
                                                  : PIC16::restore_fsr1;
     BuildMI(MBB, I, DL, get(opcode), DestReg)
-      .addImm(PTLI->GetTmpOffsetForFI(FI, 3))
+      .addImm(PTLI->GetTmpOffsetForFI(FI, 3, *MBB.getParent()))
       .addExternalSymbol(tmpName)
       .addImm(1); // Emit banksel for it.
   }
@@ -153,9 +155,8 @@ bool PIC16InstrInfo::copyRegToReg (MachineBasicBlock &MBB,
                                    MachineBasicBlock::iterator I,
                                    unsigned DestReg, unsigned SrcReg,
                                    const TargetRegisterClass *DestRC,
-                                   const TargetRegisterClass *SrcRC) const {
-  DebugLoc DL = DebugLoc::getUnknownLoc();
-  if (I != MBB.end()) DL = I->getDebugLoc();
+                                   const TargetRegisterClass *SrcRC,
+                                   DebugLoc DL) const {
 
   if (DestRC == PIC16::FSR16RegisterClass) {
     BuildMI(MBB, I, DL, get(PIC16::copy_fsr), DestReg).addReg(SrcReg);
@@ -202,7 +203,7 @@ InsertBranch(MachineBasicBlock &MBB, MachineBasicBlock *TBB,
   if (FBB == 0) { // One way branch.
     if (Cond.empty()) {
       // Unconditional branch?
-      DebugLoc dl = DebugLoc::getUnknownLoc();
+      DebugLoc dl;
       BuildMI(&MBB, dl, get(PIC16::br_uncond)).addMBB(TBB);
     }
     return 1;
@@ -226,6 +227,11 @@ bool PIC16InstrInfo::AnalyzeBranch(MachineBasicBlock &MBB,
 
   // Get the terminator instruction.
   --I;
+  while (I->isDebugValue()) {
+    if (I == MBB.begin())
+      return true;
+    --I;
+  }
   // Handle unconditional branches. If the unconditional branch's target is
   // successor basic block then remove the unconditional branch. 
   if (I->getOpcode() == PIC16::br_uncond  && AllowModify) {

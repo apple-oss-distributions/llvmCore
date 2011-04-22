@@ -18,7 +18,6 @@
 #include <vector>
 #include <map>
 #include <string>
-#include "llvm/ModuleProvider.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/ValueMap.h"
@@ -92,7 +91,6 @@ class ExecutionEngine {
   bool CompilingLazily;
   bool GVCompilationDisabled;
   bool SymbolSearchingDisabled;
-  bool DlsymStubsEnabled;
 
   friend class EngineBuilder;  // To allow access to JITCtor and InterpCtor.
 
@@ -170,15 +168,6 @@ public:
   ///
   /// Clients should make sure to initialize targets prior to calling this
   /// function.
-  static ExecutionEngine *createJIT(ModuleProvider *MP,
-                                    std::string *ErrorStr = 0,
-                                    JITMemoryManager *JMM = 0,
-                                    CodeGenOpt::Level OptLevel =
-                                      CodeGenOpt::Default,
-                                    bool GVsWithCode = true,
-				    CodeModel::Model CMM =
-				      CodeModel::Default);
-
   static ExecutionEngine *createJIT(Module *M,
                                     std::string *ErrorStr = 0,
                                     JITMemoryManager *JMM = 0,
@@ -188,13 +177,6 @@ public:
 				    CodeModel::Model CMM =
 				      CodeModel::Default);
 
-  /// addModuleProvider - Add a ModuleProvider to the list of modules that we
-  /// can JIT from.  Note that this takes ownership of the ModuleProvider: when
-  /// the ExecutionEngine is destroyed, it destroys the MP as well.
-  virtual void addModuleProvider(ModuleProvider *P) {
-    Modules.push_back(P->getModule());
-  }
-  
   /// addModule - Add a Module to the list of modules that we can JIT from.
   /// Note that this takes ownership of the Module: when the ExecutionEngine is
   /// destroyed, it destroys the Module as well.
@@ -206,13 +188,6 @@ public:
 
   const TargetData *getTargetData() const { return TD; }
 
-
-
-  /// removeModuleProvider - Remove a ModuleProvider from the list of modules.
-  /// Relases the Module from the ModuleProvider, materializing it in the
-  /// process, and returns the materialized Module.
-  virtual Module* removeModuleProvider(ModuleProvider *P,
-                                       std::string *ErrInfo = 0);
 
   /// removeModule - Remove a Module from the list of modules.  Returns true if
   /// M is found.
@@ -388,15 +363,7 @@ public:
   bool isSymbolSearchingDisabled() const {
     return SymbolSearchingDisabled;
   }
-  
-  /// EnableDlsymStubs - 
-  void EnableDlsymStubs(bool Enabled = true) {
-    DlsymStubsEnabled = Enabled;
-  }
-  bool areDlsymStubsEnabled() const {
-    return DlsymStubsEnabled;
-  }
-  
+
   /// InstallLazyFunctionCreator - If an unknown function is needed, the
   /// specified function pointer is invoked to create it.  If it returns null,
   /// the JIT will abort.
@@ -470,13 +437,6 @@ class EngineBuilder {
   }
 
  public:
-  /// EngineBuilder - Constructor for EngineBuilder.  If create() is called and
-  /// is successful, the created engine takes ownership of the module
-  /// provider.
-  EngineBuilder(ModuleProvider *mp) : M(mp->getModule()) {
-    InitEngine();
-  }
-
   /// EngineBuilder - Constructor for EngineBuilder.  If create() is called and
   /// is successful, the created engine takes ownership of the module.
   EngineBuilder(Module *m) : M(m) {

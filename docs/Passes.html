@@ -85,6 +85,10 @@ perl -e '$/ = undef; for (split(/\n/, <>)) { s:^ *///? ?::; print "  <p>\n" if !
 <tr><td><a href="#dot-callgraph">-dot-callgraph</a></td><td>Print Call Graph to 'dot' file</td></tr>
 <tr><td><a href="#dot-cfg">-dot-cfg</a></td><td>Print CFG of function to 'dot' file</td></tr>
 <tr><td><a href="#dot-cfg-only">-dot-cfg-only</a></td><td>Print CFG of function to 'dot' file (with no function bodies)</td></tr>
+<tr><td><a href="#dot-dom">-dot-dom</a></td><td>Print dominator tree of function to 'dot' file</td></tr>
+<tr><td><a href="#dot-dom-only">-dot-dom-only</a></td><td>Print dominator tree of function to 'dot' file (with no function bodies)</td></tr>
+<tr><td><a href="#dot-postdom">-dot-postdom</a></td><td>Print post dominator tree of function to 'dot' file</td></tr>
+<tr><td><a href="#dot-postdom-only">-dot-postdom-only</a></td><td>Print post dominator tree of function to 'dot' file (with no function bodies)</td></tr>
 <tr><td><a href="#globalsmodref-aa">-globalsmodref-aa</a></td><td>Simple mod/ref analysis for globals</td></tr>
 <tr><td><a href="#instcount">-instcount</a></td><td>Counts the various types of Instructions</td></tr>
 <tr><td><a href="#intervals">-intervals</a></td><td>Interval Partition Construction</td></tr>
@@ -114,7 +118,6 @@ perl -e '$/ = undef; for (split(/\n/, <>)) { s:^ *///? ?::; print "  <p>\n" if !
 <tr><td><a href="#block-placement">-block-placement</a></td><td>Profile Guided Basic Block Placement</td></tr>
 <tr><td><a href="#break-crit-edges">-break-crit-edges</a></td><td>Break critical edges in CFG</td></tr>
 <tr><td><a href="#codegenprepare">-codegenprepare</a></td><td>Prepare a function for code generation </td></tr>
-<tr><td><a href="#condprop">-condprop</a></td><td>Conditional Propagation</td></tr>
 <tr><td><a href="#constmerge">-constmerge</a></td><td>Merge Duplicate Global Constants</td></tr>
 <tr><td><a href="#constprop">-constprop</a></td><td>Simple constant propagation</td></tr>
 <tr><td><a href="#dce">-dce</a></td><td>Dead Code Elimination</td></tr>
@@ -178,6 +181,10 @@ perl -e '$/ = undef; for (split(/\n/, <>)) { s:^ *///? ?::; print "  <p>\n" if !
 <tr><td><a href="#verify">-verify</a></td><td>Module Verifier</td></tr>
 <tr><td><a href="#view-cfg">-view-cfg</a></td><td>View CFG of function</td></tr>
 <tr><td><a href="#view-cfg-only">-view-cfg-only</a></td><td>View CFG of function (with no function bodies)</td></tr>
+<tr><td><a href="#view-dom">-view-dom</a></td><td>View dominator tree of function</td></tr>
+<tr><td><a href="#view-dom-only">-view-dom-only</a></td><td>View dominator tree of function (with no function bodies)</td></tr>
+<tr><td><a href="#view-postdom">-view-postdom</a></td><td>View post dominator tree of function</td></tr>
+<tr><td><a href="#view-postdom-only">-view-postdom-only</a></td><td>View post dominator tree of function (with no function bodies)</td></tr>
 </table>
 </div>
 
@@ -314,6 +321,58 @@ perl -e '$/ = undef; for (split(/\n/, <>)) { s:^ *///? ?::; print "  <p>\n" if !
 <div class="doc_text">
   <p>
   This pass, only available in <code>opt</code>, prints the control flow graph
+  into a <code>.dot</code> graph, omitting the function bodies.  This graph can
+  then be processed with the "dot" tool to convert it to postscript or some
+  other suitable format.
+  </p>
+</div>
+
+<!-------------------------------------------------------------------------- -->
+<div class="doc_subsection">
+  <a name="dot-dom">Print dominator tree of function to 'dot' file</a>
+</div>
+<div class="doc_text">
+  <p>
+  This pass, only available in <code>opt</code>, prints the dominator tree
+  into a <code>.dot</code> graph.  This graph can then be processed with the
+  "dot" tool to convert it to postscript or some other suitable format.
+  </p>
+</div>
+
+<!-------------------------------------------------------------------------- -->
+<div class="doc_subsection">
+  <a name="dot-dom-only">Print dominator tree of function to 'dot' file (with no
+  function bodies)</a>
+</div>
+<div class="doc_text">
+  <p>
+  This pass, only available in <code>opt</code>, prints the dominator tree
+  into a <code>.dot</code> graph, omitting the function bodies.  This graph can
+  then be processed with the "dot" tool to convert it to postscript or some
+  other suitable format.
+  </p>
+</div>
+
+<!-------------------------------------------------------------------------- -->
+<div class="doc_subsection">
+  <a name="dot-postdom">Print post dominator tree of function to 'dot' file</a>
+</div>
+<div class="doc_text">
+  <p>
+  This pass, only available in <code>opt</code>, prints the post dominator tree
+  into a <code>.dot</code> graph.  This graph can then be processed with the
+  "dot" tool to convert it to postscript or some other suitable format.
+  </p>
+</div>
+
+<!-------------------------------------------------------------------------- -->
+<div class="doc_subsection">
+  <a name="dot-postdom-only">Print post dominator tree of function to 'dot' file
+  (with no function bodies)</a>
+</div>
+<div class="doc_text">
+  <p>
+  This pass, only available in <code>opt</code>, prints the post dominator tree
   into a <code>.dot</code> graph, omitting the function bodies.  This graph can
   then be processed with the "dot" tool to convert it to postscript or some
   other suitable format.
@@ -637,15 +696,6 @@ perl -e '$/ = undef; for (split(/\n/, <>)) { s:^ *///? ?::; print "  <p>\n" if !
   This pass munges the code in the input function to better prepare it for
   SelectionDAG-based code generation. This works around limitations in it's
   basic-block-at-a-time approach. It should eventually be removed.
-</div>
-
-<!-------------------------------------------------------------------------- -->
-<div class="doc_subsection">
-  <a name="condprop">Conditional Propagation</a>
-</div>
-<div class="doc_text">
-  <p>This pass propagates information about conditional expressions through the
-  program, allowing it to eliminate conditional branches in some cases.</p>
 </div>
 
 <!-------------------------------------------------------------------------- -->
@@ -1762,6 +1812,52 @@ if (X &lt; 3) {</pre>
   </p>
 </div>
 
+<!-------------------------------------------------------------------------- -->
+<div class="doc_subsection">
+  <a name="view-dom">View dominator tree of function</a>
+</div>
+<div class="doc_text">
+  <p>
+  Displays the dominator tree using the GraphViz tool.
+  </p>
+</div>
+
+<!-------------------------------------------------------------------------- -->
+<div class="doc_subsection">
+  <a name="view-dom-only">View dominator tree of function (with no function
+  bodies)
+  </a>
+</div>
+<div class="doc_text">
+  <p>
+  Displays the dominator tree using the GraphViz tool, but omitting function
+  bodies.
+  </p>
+</div>
+
+<!-------------------------------------------------------------------------- -->
+<div class="doc_subsection">
+  <a name="view-postdom">View post dominator tree of function</a>
+</div>
+<div class="doc_text">
+  <p>
+  Displays the post dominator tree using the GraphViz tool.
+  </p>
+</div>
+
+<!-------------------------------------------------------------------------- -->
+<div class="doc_subsection">
+  <a name="view-postdom-only">View post dominator tree of function (with no
+  function bodies)
+  </a>
+</div>
+<div class="doc_text">
+  <p>
+  Displays the post dominator tree using the GraphViz tool, but omitting
+  function bodies.
+  </p>
+</div>
+
 <!-- *********************************************************************** -->
 
 <hr>
@@ -1773,7 +1869,7 @@ if (X &lt; 3) {</pre>
 
   <a href="mailto:rspencer@x10sys.com">Reid Spencer</a><br>
   <a href="http://llvm.org">LLVM Compiler Infrastructure</a><br>
-  Last modified: $Date: 2010-03-01 11:24:17 -0800 (Mon, 01 Mar 2010) $
+  Last modified: $Date: 2010-05-07 02:33:18 -0700 (Fri, 07 May 2010) $
 </address>
 
 </body>

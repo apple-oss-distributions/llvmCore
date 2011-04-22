@@ -123,8 +123,7 @@ isStoreToStackSlot(const MachineInstr *MI, int &FrameIndex) const
 void MipsInstrInfo::
 insertNoop(MachineBasicBlock &MBB, MachineBasicBlock::iterator MI) const 
 {
-  DebugLoc DL = DebugLoc::getUnknownLoc();
-  if (MI != MBB.end()) DL = MI->getDebugLoc();
+  DebugLoc DL;
   BuildMI(MBB, MI, DL, get(Mips::NOP));
 }
 
@@ -132,10 +131,8 @@ bool MipsInstrInfo::
 copyRegToReg(MachineBasicBlock &MBB, MachineBasicBlock::iterator I,
              unsigned DestReg, unsigned SrcReg,
              const TargetRegisterClass *DestRC,
-             const TargetRegisterClass *SrcRC) const {
-  DebugLoc DL = DebugLoc::getUnknownLoc();
-  
-  if (I != MBB.end()) DL = I->getDebugLoc();
+             const TargetRegisterClass *SrcRC,
+             DebugLoc DL) const {
 
   if (DestRC != SrcRC) {
 
@@ -190,8 +187,9 @@ copyRegToReg(MachineBasicBlock &MBB, MachineBasicBlock::iterator I,
 void MipsInstrInfo::
 storeRegToStackSlot(MachineBasicBlock &MBB, MachineBasicBlock::iterator I,
                     unsigned SrcReg, bool isKill, int FI, 
-                    const TargetRegisterClass *RC) const {
-  DebugLoc DL = DebugLoc::getUnknownLoc();
+                    const TargetRegisterClass *RC,
+                    const TargetRegisterInfo *TRI) const {
+  DebugLoc DL;
   if (I != MBB.end()) DL = I->getDebugLoc();
 
   if (RC == Mips::CPURegsRegisterClass) 
@@ -223,9 +221,10 @@ storeRegToStackSlot(MachineBasicBlock &MBB, MachineBasicBlock::iterator I,
 void MipsInstrInfo::
 loadRegFromStackSlot(MachineBasicBlock &MBB, MachineBasicBlock::iterator I,
                      unsigned DestReg, int FI,
-                     const TargetRegisterClass *RC) const 
+                     const TargetRegisterClass *RC,
+                     const TargetRegisterInfo *TRI) const 
 {
-  DebugLoc DL = DebugLoc::getUnknownLoc();
+  DebugLoc DL;
   if (I != MBB.end()) DL = I->getDebugLoc();
 
   if (RC == Mips::CPURegsRegisterClass) 
@@ -433,7 +432,15 @@ bool MipsInstrInfo::AnalyzeBranch(MachineBasicBlock &MBB,
 {
   // If the block has no terminators, it just falls into the block after it.
   MachineBasicBlock::iterator I = MBB.end();
-  if (I == MBB.begin() || !isUnpredicatedTerminator(--I))
+  if (I == MBB.begin())
+    return false;
+  --I;
+  while (I->isDebugValue()) {
+    if (I == MBB.begin())
+      return false;
+    --I;
+  }
+  if (!isUnpredicatedTerminator(I))
     return false;
   
   // Get the last instruction in the block.
@@ -515,7 +522,7 @@ InsertBranch(MachineBasicBlock &MBB, MachineBasicBlock *TBB,
              MachineBasicBlock *FBB,
              const SmallVectorImpl<MachineOperand> &Cond) const {
   // FIXME this should probably have a DebugLoc argument
-  DebugLoc dl = DebugLoc::getUnknownLoc();
+  DebugLoc dl;
   // Shouldn't be a fall through.
   assert(TBB && "InsertBranch must not be told to insert a fallthrough");
   assert((Cond.size() == 3 || Cond.size() == 2 || Cond.size() == 0) &&
@@ -562,6 +569,11 @@ RemoveBranch(MachineBasicBlock &MBB) const
   MachineBasicBlock::iterator I = MBB.end();
   if (I == MBB.begin()) return 0;
   --I;
+  while (I->isDebugValue()) {
+    if (I == MBB.begin())
+      return 0;
+    --I;
+  }
   if (I->getOpcode() != Mips::J && 
       GetCondFromBranchOpc(I->getOpcode()) == Mips::COND_INVALID)
     return 0;
@@ -611,7 +623,8 @@ unsigned MipsInstrInfo::getGlobalBaseReg(MachineFunction *MF) const {
   GlobalBaseReg = RegInfo.createVirtualRegister(Mips::CPURegsRegisterClass);
   bool Ok = TII->copyRegToReg(FirstMBB, MBBI, GlobalBaseReg, Mips::GP,
                               Mips::CPURegsRegisterClass,
-                              Mips::CPURegsRegisterClass);
+                              Mips::CPURegsRegisterClass,
+                              DebugLoc());
   assert(Ok && "Couldn't assign to global base register!");
   Ok = Ok; // Silence warning when assertions are turned off.
   RegInfo.addLiveIn(Mips::GP);

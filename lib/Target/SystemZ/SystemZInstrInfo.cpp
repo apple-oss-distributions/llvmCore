@@ -61,8 +61,9 @@ static inline bool isGVStub(GlobalValue *GV, SystemZTargetMachine &TM) {
 void SystemZInstrInfo::storeRegToStackSlot(MachineBasicBlock &MBB,
                                           MachineBasicBlock::iterator MI,
                                     unsigned SrcReg, bool isKill, int FrameIdx,
-                                    const TargetRegisterClass *RC) const {
-  DebugLoc DL = DebugLoc::getUnknownLoc();
+                                           const TargetRegisterClass *RC,
+                                           const TargetRegisterInfo *TRI) const {
+  DebugLoc DL;
   if (MI != MBB.end()) DL = MI->getDebugLoc();
 
   unsigned Opc = 0;
@@ -90,8 +91,9 @@ void SystemZInstrInfo::storeRegToStackSlot(MachineBasicBlock &MBB,
 void SystemZInstrInfo::loadRegFromStackSlot(MachineBasicBlock &MBB,
                                            MachineBasicBlock::iterator MI,
                                            unsigned DestReg, int FrameIdx,
-                                           const TargetRegisterClass *RC) const{
-  DebugLoc DL = DebugLoc::getUnknownLoc();
+                                            const TargetRegisterClass *RC,
+                                            const TargetRegisterInfo *TRI) const{
+  DebugLoc DL;
   if (MI != MBB.end()) DL = MI->getDebugLoc();
 
   unsigned Opc = 0;
@@ -119,9 +121,8 @@ bool SystemZInstrInfo::copyRegToReg(MachineBasicBlock &MBB,
                                     MachineBasicBlock::iterator I,
                                     unsigned DestReg, unsigned SrcReg,
                                     const TargetRegisterClass *DestRC,
-                                    const TargetRegisterClass *SrcRC) const {
-  DebugLoc DL = DebugLoc::getUnknownLoc();
-  if (I != MBB.end()) DL = I->getDebugLoc();
+                                    const TargetRegisterClass *SrcRC,
+                                    DebugLoc DL) const {
 
   // Determine if DstRC and SrcRC have a common superclass.
   const TargetRegisterClass *CommonRC = DestRC;
@@ -273,7 +274,7 @@ SystemZInstrInfo::spillCalleeSavedRegisters(MachineBasicBlock &MBB,
   if (CSI.empty())
     return false;
 
-  DebugLoc DL = DebugLoc::getUnknownLoc();
+  DebugLoc DL;
   if (MI != MBB.end()) DL = MI->getDebugLoc();
 
   MachineFunction &MF = *MBB.getParent();
@@ -333,7 +334,8 @@ SystemZInstrInfo::spillCalleeSavedRegisters(MachineBasicBlock &MBB,
     const TargetRegisterClass *RegClass = CSI[i].getRegClass();
     if (RegClass == &SystemZ::FP64RegClass) {
       MBB.addLiveIn(Reg);
-      storeRegToStackSlot(MBB, MI, Reg, true, CSI[i].getFrameIdx(), RegClass);
+      storeRegToStackSlot(MBB, MI, Reg, true, CSI[i].getFrameIdx(), RegClass,
+                          &RI);
     }
   }
 
@@ -347,7 +349,7 @@ SystemZInstrInfo::restoreCalleeSavedRegisters(MachineBasicBlock &MBB,
   if (CSI.empty())
     return false;
 
-  DebugLoc DL = DebugLoc::getUnknownLoc();
+  DebugLoc DL;
   if (MI != MBB.end()) DL = MI->getDebugLoc();
 
   MachineFunction &MF = *MBB.getParent();
@@ -359,7 +361,7 @@ SystemZInstrInfo::restoreCalleeSavedRegisters(MachineBasicBlock &MBB,
     unsigned Reg = CSI[i].getReg();
     const TargetRegisterClass *RegClass = CSI[i].getRegClass();
     if (RegClass == &SystemZ::FP64RegClass)
-      loadRegFromStackSlot(MBB, MI, Reg, CSI[i].getFrameIdx(), RegClass);
+      loadRegFromStackSlot(MBB, MI, Reg, CSI[i].getFrameIdx(), RegClass, &RI);
   }
 
   // Restore GP registers
@@ -424,6 +426,8 @@ bool SystemZInstrInfo::AnalyzeBranch(MachineBasicBlock &MBB,
   MachineBasicBlock::iterator I = MBB.end();
   while (I != MBB.begin()) {
     --I;
+    if (I->isDebugValue())
+      continue;
     // Working from the bottom, when we see a non-terminator
     // instruction, we're done.
     if (!isUnpredicatedTerminator(I))
@@ -500,6 +504,8 @@ unsigned SystemZInstrInfo::RemoveBranch(MachineBasicBlock &MBB) const {
 
   while (I != MBB.begin()) {
     --I;
+    if (I->isDebugValue())
+      continue;
     if (I->getOpcode() != SystemZ::JMP &&
         getCondFromBranchOpc(I->getOpcode()) == SystemZCC::INVALID)
       break;
@@ -517,7 +523,7 @@ SystemZInstrInfo::InsertBranch(MachineBasicBlock &MBB, MachineBasicBlock *TBB,
                                MachineBasicBlock *FBB,
                             const SmallVectorImpl<MachineOperand> &Cond) const {
   // FIXME: this should probably have a DebugLoc operand
-  DebugLoc dl = DebugLoc::getUnknownLoc();
+  DebugLoc DL;
   // Shouldn't be a fall through.
   assert(TBB && "InsertBranch must not be told to insert a fallthrough");
   assert((Cond.size() == 1 || Cond.size() == 0) &&
@@ -526,19 +532,19 @@ SystemZInstrInfo::InsertBranch(MachineBasicBlock &MBB, MachineBasicBlock *TBB,
   if (Cond.empty()) {
     // Unconditional branch?
     assert(!FBB && "Unconditional branch with multiple successors!");
-    BuildMI(&MBB, dl, get(SystemZ::JMP)).addMBB(TBB);
+    BuildMI(&MBB, DL, get(SystemZ::JMP)).addMBB(TBB);
     return 1;
   }
 
   // Conditional branch.
   unsigned Count = 0;
   SystemZCC::CondCodes CC = (SystemZCC::CondCodes)Cond[0].getImm();
-  BuildMI(&MBB, dl, getBrCond(CC)).addMBB(TBB);
+  BuildMI(&MBB, DL, getBrCond(CC)).addMBB(TBB);
   ++Count;
 
   if (FBB) {
     // Two-way Conditional branch. Insert the second branch.
-    BuildMI(&MBB, dl, get(SystemZ::JMP)).addMBB(FBB);
+    BuildMI(&MBB, DL, get(SystemZ::JMP)).addMBB(FBB);
     ++Count;
   }
   return Count;

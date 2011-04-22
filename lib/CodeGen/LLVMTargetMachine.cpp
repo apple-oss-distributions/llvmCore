@@ -50,6 +50,9 @@ static cl::opt<bool> DisableSSC("disable-ssc", cl::Hidden,
     cl::desc("Disable Stack Slot Coloring"));
 static cl::opt<bool> DisableMachineLICM("disable-machine-licm", cl::Hidden,
     cl::desc("Disable Machine LICM"));
+static cl::opt<bool> DisablePostRAMachineLICM("disable-postra-machine-licm",
+    cl::Hidden,
+    cl::desc("Disable Machine LICM"));
 static cl::opt<bool> DisableMachineSink("disable-machine-sink", cl::Hidden,
     cl::desc("Disable Machine Sinking"));
 static cl::opt<bool> DisableLSR("disable-lsr", cl::Hidden,
@@ -62,6 +65,10 @@ static cl::opt<bool> PrintISelInput("print-isel-input", cl::Hidden,
     cl::desc("Print LLVM IR input to isel pass"));
 static cl::opt<bool> PrintGCInfo("print-gc", cl::Hidden,
     cl::desc("Dump garbage collector data"));
+static cl::opt<bool> ShowMCEncoding("show-mc-encoding", cl::Hidden,
+    cl::desc("Show encoding in .s output"));
+static cl::opt<bool> ShowMCInst("show-mc-inst", cl::Hidden,
+    cl::desc("Show instruction structure in .s output"));
 static cl::opt<bool> VerifyMachineCode("verify-machineinstrs", cl::Hidden,
     cl::desc("Verify generated machine code"),
     cl::init(getenv("LLVM_VERIFY_MACHINEINSTRS")!=NULL));
@@ -123,52 +130,47 @@ bool LLVMTargetMachine::addPassesToEmitFile(PassManagerBase &PM,
   const MCAsmInfo &MAI = *getMCAsmInfo();
   OwningPtr<MCStreamer> AsmStreamer;
 
-  formatted_raw_ostream *LegacyOutput;
   switch (FileType) {
   default: return true;
   case CGFT_AssemblyFile: {
     MCInstPrinter *InstPrinter =
-      getTarget().createMCInstPrinter(MAI.getAssemblerDialect(), MAI, Out);
+      getTarget().createMCInstPrinter(MAI.getAssemblerDialect(), MAI);
+
+    // Create a code emitter if asked to show the encoding.
+    //
+    // FIXME: These are currently leaked.
+    MCCodeEmitter *MCE = 0;
+    if (ShowMCEncoding)
+      MCE = getTarget().createCodeEmitter(*this, *Context);
+
     AsmStreamer.reset(createAsmStreamer(*Context, Out,
                                         getTargetData()->isLittleEndian(),
                                         getVerboseAsm(), InstPrinter,
-                                        /*codeemitter*/0));
-    // Set the AsmPrinter's "O" to the output file.
-    LegacyOutput = &Out;
+                                        MCE, ShowMCInst));
     break;
   }
   case CGFT_ObjectFile: {
     // Create the code emitter for the target if it exists.  If not, .o file
     // emission fails.
+    //
+    // FIXME: These are currently leaked.
     MCCodeEmitter *MCE = getTarget().createCodeEmitter(*this, *Context);
     TargetAsmBackend *TAB = getTarget().createAsmBackend(TargetTriple);
     if (MCE == 0 || TAB == 0)
       return true;
     
     AsmStreamer.reset(createMachOStreamer(*Context, *TAB, Out, MCE));
-    
-    // Any output to the asmprinter's "O" stream is bad and needs to be fixed,
-    // force it to come out stderr.
-    // FIXME: this is horrible and leaks, eventually remove the raw_ostream from
-    // asmprinter.
-    LegacyOutput = new formatted_raw_ostream(errs());
     break;
   }
   case CGFT_Null:
     // The Null output is intended for use for performance analysis and testing,
     // not real users.
     AsmStreamer.reset(createNullStreamer(*Context));
-    // Any output to the asmprinter's "O" stream is bad and needs to be fixed,
-    // force it to come out stderr.
-    // FIXME: this is horrible and leaks, eventually remove the raw_ostream from
-    // asmprinter.
-    LegacyOutput = new formatted_raw_ostream(errs());
     break;
   }
   
   // Create the AsmPrinter, which takes ownership of AsmStreamer if successful.
-  FunctionPass *Printer =
-    getTarget().createAsmPrinter(*LegacyOutput, *this, *AsmStreamer);
+  FunctionPass *Printer = getTarget().createAsmPrinter(*this, *AsmStreamer);
   if (Printer == 0)
     return true;
   
@@ -260,10 +262,10 @@ bool LLVMTargetMachine::addCommonCodeGenPasses(PassManagerBase &PM,
     // pad is shared by multiple invokes and is also a target of a normal
     // edge from elsewhere.
     PM.add(createSjLjEHPass(getTargetLowering()));
-    PM.add(createDwarfEHPass(getTargetLowering(), OptLevel==CodeGenOpt::None));
+    PM.add(createDwarfEHPass(this, OptLevel==CodeGenOpt::None));
     break;
   case ExceptionHandling::Dwarf:
-    PM.add(createDwarfEHPass(getTargetLowering(), OptLevel==CodeGenOpt::None));
+    PM.add(createDwarfEHPass(this, OptLevel==CodeGenOpt::None));
     break;
   case ExceptionHandling::None:
     PM.add(createLowerInvokePass(getTargetLowering()));
@@ -352,12 +354,18 @@ bool LLVMTargetMachine::addCommonCodeGenPasses(PassManagerBase &PM,
   PM.add(createRegisterAllocator());
   printAndVerify(PM, "After Register Allocation");
 
-  // Perform stack slot coloring.
-  if (OptLevel != CodeGenOpt::None && !DisableSSC) {
+  // Perform stack slot coloring and post-ra machine LICM.
+  if (OptLevel != CodeGenOpt::None) {
     // FIXME: Re-enable coloring with register when it's capable of adding
     // kill markers.
-    PM.add(createStackSlotColoringPass(false));
-    printAndVerify(PM, "After StackSlotColoring");
+    if (!DisableSSC)
+      PM.add(createStackSlotColoringPass(false));
+
+    // Run post-ra machine LICM to hoist reloads / remats.
+    if (!DisablePostRAMachineLICM)
+      PM.add(createMachineLICMPass(false));
+
+    printAndVerify(PM, "After StackSlotColoring and postra Machine LICM");
   }
 
   // Run post-ra passes.

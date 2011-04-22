@@ -16,6 +16,7 @@
 
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/DebugLoc.h"
+#include "llvm/System/DataTypes.h"
 
 namespace llvm {
 
@@ -40,7 +41,7 @@ private:
       SDNode *Node;         // valid for expressions
       unsigned ResNo;       // valid for expressions
     } s;
-    Value *Const;           // valid for constants
+    const Value *Const;     // valid for constants
     unsigned FrameIx;       // valid for stack objects
   } u;
   MDNode *mdPtr;
@@ -59,15 +60,16 @@ public:
   }
 
   // Constructor for constants.
-  SDDbgValue(MDNode *mdP, Value *C, uint64_t off, DebugLoc dl, unsigned O) : 
-    mdPtr(mdP), Offset(off), DL(dl), Order(O) {
+  SDDbgValue(MDNode *mdP, const Value *C, uint64_t off, DebugLoc dl,
+             unsigned O) : 
+    mdPtr(mdP), Offset(off), DL(dl), Order(O), Invalid(false) {
     kind = CONST;
     u.Const = C;
   }
 
   // Constructor for frame indices.
   SDDbgValue(MDNode *mdP, unsigned FI, uint64_t off, DebugLoc dl, unsigned O) : 
-    mdPtr(mdP), Offset(off), DL(dl), Order(O) {
+    mdPtr(mdP), Offset(off), DL(dl), Order(O), Invalid(false) {
     kind = FRAMEIX;
     u.FrameIx = FI;
   }
@@ -85,7 +87,7 @@ public:
   unsigned getResNo() { assert (kind==SDNODE); return u.s.ResNo; }
 
   // Returns the Value* for a constant
-  Value *getConst() { assert (kind==CONST); return u.Const; }
+  const Value *getConst() { assert (kind==CONST); return u.Const; }
 
   // Returns the FrameIx for a stack object
   unsigned getFrameIx() { assert (kind==FRAMEIX); return u.FrameIx; }

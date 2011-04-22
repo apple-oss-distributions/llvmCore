@@ -101,13 +101,13 @@ LTOModule* LTOModule::makeLTOModule(const char* path,
 /// Also if next byte is on a different page, don't assume it is readable.
 MemoryBuffer* LTOModule::makeBuffer(const void* mem, size_t length)
 {
-    const char* startPtr = (char*)mem;
-    const char* endPtr = startPtr+length;
-    if ((((uintptr_t)endPtr & (sys::Process::GetPageSize()-1)) == 0) 
-        || (*endPtr != 0)) 
-        return MemoryBuffer::getMemBufferCopy(startPtr, endPtr);
-    else
-        return MemoryBuffer::getMemBuffer(startPtr, endPtr);
+    const char *startPtr = (char*)mem;
+    const char *endPtr = startPtr+length;
+    if (((uintptr_t)endPtr & (sys::Process::GetPageSize()-1)) == 0 ||
+        *endPtr != 0) 
+        return MemoryBuffer::getMemBufferCopy(StringRef(startPtr, length));
+  
+    return MemoryBuffer::getMemBuffer(StringRef(startPtr, length));
 }
 
 
@@ -140,8 +140,9 @@ LTOModule* LTOModule::makeLTOModule(MemoryBuffer* buffer,
         return NULL;
 
     // construct LTModule, hand over ownership of module and target
-    const std::string FeatureStr = 
-        SubtargetFeatures::getDefaultSubtargetFeatures(llvm::Triple(Triple));
+    SubtargetFeatures Features;
+    Features.getDefaultSubtargetFeatures("" /* cpu */, llvm::Triple(Triple));
+    std::string FeatureStr = Features.getString();
     TargetMachine* target = march->createTargetMachine(Triple, FeatureStr);
     return new LTOModule(m.take(), target);
 }

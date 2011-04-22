@@ -111,7 +111,8 @@ namespace {
     static char ID;
     explicit CWriter(formatted_raw_ostream &o)
       : FunctionPass(&ID), Out(o), IL(0), Mang(0), LI(0), 
-        TheModule(0), TAsm(0), TD(0), OpaqueCounter(0), NextAnonValueNumber(0) {
+        TheModule(0), TAsm(0), TCtx(0), TD(0), OpaqueCounter(0),
+        NextAnonValueNumber(0) {
       FPCounter = 0;
     }
 
@@ -147,6 +148,8 @@ namespace {
       delete IL;
       delete TD;
       delete Mang;
+      delete TCtx;
+      delete TAsm;
       FPConstantMap.clear();
       TypeNames.clear();
       ByValParams.clear();
@@ -271,8 +274,8 @@ namespace {
     
     // isInlineAsm - Check if the instruction is a call to an inline asm chunk
     static bool isInlineAsm(const Instruction& I) {
-      if (isa<CallInst>(&I) && isa<InlineAsm>(I.getOperand(0)))
-        return true;
+      if (const CallInst *CI = dyn_cast<CallInst>(&I))
+        return isa<InlineAsm>(CI->getCalledValue());
       return false;
     }
     
@@ -470,8 +473,9 @@ void CWriter::printStructReturnPointerFunctionType(raw_ostream &Out,
     PrintedType = true;
   }
   if (FTy->isVarArg()) {
-    if (PrintedType)
-      FunctionInnards << ", ...";
+    if (!PrintedType)
+      FunctionInnards << " int"; //dummy argument for empty vararg functs
+    FunctionInnards << ", ...";
   } else if (!PrintedType) {
     FunctionInnards << "void";
   }
@@ -565,8 +569,9 @@ raw_ostream &CWriter::printType(raw_ostream &Out, const Type *Ty,
       ++Idx;
     }
     if (FTy->isVarArg()) {
-      if (FTy->getNumParams())
-        FunctionInnards << ", ...";
+      if (!FTy->getNumParams())
+        FunctionInnards << " int"; //dummy argument for empty vaarg functs
+      FunctionInnards << ", ...";
     } else if (!FTy->getNumParams()) {
       FunctionInnards << "void";
     }
@@ -1341,7 +1346,7 @@ void CWriter::writeInstComputationInline(Instruction &I) {
         Ty!=Type::getInt16Ty(I.getContext()) &&
         Ty!=Type::getInt32Ty(I.getContext()) &&
         Ty!=Type::getInt64Ty(I.getContext()))) {
-      llvm_report_error("The C backend does not currently support integer "
+      report_fatal_error("The C backend does not currently support integer "
                         "types of widths other than 1, 8, 16, 32, 64.\n"
                         "This is being tracked as PR 4158.");
   }
@@ -2160,6 +2165,9 @@ void CWriter::printFunctionSignature(const Function *F, bool Prototype) {
    case CallingConv::X86_FastCall:
     Out << "__attribute__((fastcall)) ";
     break;
+   case CallingConv::X86_ThisCall:
+    Out << "__attribute__((thiscall)) ";
+    break;
    default:
     break;
   }
@@ -2234,12 +2242,16 @@ void CWriter::printFunctionSignature(const Function *F, bool Prototype) {
     }
   }
 
+  if (!PrintedArg && FT->isVarArg()) {
+    FunctionInnards << "int vararg_dummy_arg";
+    PrintedArg = true;
+  }
+
   // Finish printing arguments... if this is a vararg function, print the ...,
   // unless there are no known types, in which case, we just emit ().
   //
   if (FT->isVarArg() && PrintedArg) {
-    if (PrintedArg) FunctionInnards << ", ";
-    FunctionInnards << "...";  // Output varargs portion of signature!
+    FunctionInnards << ",...";  // Output varargs portion of signature!
   } else if (!FT->isVarArg() && !PrintedArg) {
     FunctionInnards << "void"; // ret() -> ret(void) in C.
   }
@@ -2855,7 +2867,7 @@ void CWriter::lowerIntrinsics(Function &F) {
 }
 
 void CWriter::visitCallInst(CallInst &I) {
-  if (isa<InlineAsm>(I.getOperand(0)))
+  if (isa<InlineAsm>(I.getCalledValue()))
     return visitInlineAsm(I);
 
   bool WroteCallee = false;
@@ -2925,6 +2937,12 @@ void CWriter::visitCallInst(CallInst &I) {
 
   Out << '(';
 
+  bool PrintedArg = false;
+  if(FTy->isVarArg() && !FTy->getNumParams()) {
+    Out << "0 /*dummy arg*/";
+    PrintedArg = true;
+  }
+
   unsigned NumDeclaredParams = FTy->getNumParams();
 
   CallSite::arg_iterator AI = I.op_begin()+1, AE = I.op_end();
@@ -2934,7 +2952,7 @@ void CWriter::visitCallInst(CallInst &I) {
     ++ArgNo;
   }
       
-  bool PrintedArg = false;
+
   for (; AI != AE; ++AI, ++ArgNo) {
     if (PrintedArg) Out << ", ";
     if (ArgNo < NumDeclaredParams &&
@@ -2984,15 +3002,10 @@ bool CWriter::visitBuiltinCall(CallInst &I, Intrinsic::ID ID,
     writeOperand(I.getOperand(1));
     Out << ", ";
     // Output the last argument to the enclosing function.
-    if (I.getParent()->getParent()->arg_empty()) {
-      std::string msg;
-      raw_string_ostream Msg(msg);
-      Msg << "The C backend does not currently support zero "
-           << "argument varargs functions, such as '"
-           << I.getParent()->getParent()->getName() << "'!";
-      llvm_report_error(Msg.str());
-    }
-    writeOperand(--I.getParent()->getParent()->arg_end());
+    if (I.getParent()->getParent()->arg_empty())
+      Out << "vararg_dummy_arg";
+    else
+      writeOperand(--I.getParent()->getParent()->arg_end());
     Out << ')';
     return true;
   case Intrinsic::vaend:
@@ -3162,7 +3175,7 @@ static std::string gccifyAsm(std::string asmstr) {
 //TODO: assumptions about what consume arguments from the call are likely wrong
 //      handle communitivity
 void CWriter::visitInlineAsm(CallInst &CI) {
-  InlineAsm* as = cast<InlineAsm>(CI.getOperand(0));
+  InlineAsm* as = cast<InlineAsm>(CI.getCalledValue());
   std::vector<InlineAsm::ConstraintInfo> Constraints = as->ParseConstraints();
   
   std::vector<std::pair<Value*, int> > ResultVals;
@@ -3544,11 +3557,11 @@ void CWriter::visitExtractValueInst(ExtractValueInst &EVI) {
 //                       External Interface declaration
 //===----------------------------------------------------------------------===//
 
-bool CTargetMachine::addPassesToEmitWholeFile(PassManager &PM,
-                                              formatted_raw_ostream &o,
-                                              CodeGenFileType FileType,
-                                              CodeGenOpt::Level OptLevel,
-                                              bool DisableVerify) {
+bool CTargetMachine::addPassesToEmitFile(PassManagerBase &PM,
+                                         formatted_raw_ostream &o,
+                                         CodeGenFileType FileType,
+                                         CodeGenOpt::Level OptLevel,
+                                         bool DisableVerify) {
   if (FileType != TargetMachine::CGFT_AssemblyFile) return true;
 
   PM.add(createGCLoweringPass());

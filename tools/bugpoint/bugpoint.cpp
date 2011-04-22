@@ -25,6 +25,7 @@
 #include "llvm/Support/StandardPasses.h"
 #include "llvm/System/Process.h"
 #include "llvm/System/Signals.h"
+#include "llvm/System/Valgrind.h"
 #include "llvm/LinkAllVMCore.h"
 using namespace llvm;
 
@@ -48,9 +49,14 @@ TimeoutValue("timeout", cl::init(300), cl::value_desc("seconds"),
              cl::desc("Number of seconds program is allowed to run before it "
                       "is killed (default is 300s), 0 disables timeout"));
 
-static cl::opt<unsigned>
-MemoryLimit("mlimit", cl::init(100), cl::value_desc("MBytes"),
-             cl::desc("Maximum amount of memory to use. 0 disables check."));
+static cl::opt<int>
+MemoryLimit("mlimit", cl::init(-1), cl::value_desc("MBytes"),
+             cl::desc("Maximum amount of memory to use. 0 disables check."
+                      " Defaults to 100MB (800MB under valgrind)."));
+
+static cl::opt<bool>
+UseValgrind("enable-valgrind",
+            cl::desc("Run optimizations through valgrind"));
 
 // The AnalysesList is automatically populated with registered Passes by the
 // PassNameParser.
@@ -108,7 +114,17 @@ int main(int argc, char **argv) {
     outs() << "Override triple set to '" << OverrideTriple << "'\n";
   }
 
-  BugDriver D(argv[0], AsChild, FindBugs, TimeoutValue, MemoryLimit, Context);
+  if (MemoryLimit < 0) {
+    // Set the default MemoryLimit.  Be sure to update the flag's description if
+    // you change this.
+    if (sys::RunningOnValgrind() || UseValgrind)
+      MemoryLimit = 800;
+    else
+      MemoryLimit = 100;
+  }
+
+  BugDriver D(argv[0], AsChild, FindBugs, TimeoutValue, MemoryLimit,
+              UseValgrind, Context);
   if (D.addSources(InputFilenames)) return 1;
   
   AddToDriver PM(D);
@@ -133,23 +149,11 @@ int main(int argc, char **argv) {
   // avoid filling up the disk, we prevent it
   sys::Process::PreventCoreFiles();
 
-  try {
-    return D.run();
-  } catch (ToolExecutionError &TEE) {
-    errs() << "Tool execution error: " << TEE.what() << '\n';
-  } catch (const std::string& msg) {
-    errs() << argv[0] << ": " << msg << "\n";
-  } catch (const std::bad_alloc&) {
-    errs() << "Oh no, a bugpoint process ran out of memory!\n"
-              "To increase the allocation limits for bugpoint child\n"
-              "processes, use the -mlimit option.\n";
-  } catch (const std::exception &e) {
-    errs() << "Whoops, a std::exception leaked out of bugpoint: "
-           << e.what() << "\n"
-           << "This is a bug in bugpoint!\n";
-  } catch (...) {
-    errs() << "Whoops, an exception leaked out of bugpoint.  "
-           << "This is a bug in bugpoint!\n";
+  std::string Error;
+  bool Failure = D.run(Error);
+  if (!Error.empty()) {
+    errs() << Error;
+    return 1;
   }
-  return 1;
+  return Failure;
 }

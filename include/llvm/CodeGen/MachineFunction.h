@@ -26,13 +26,13 @@
 
 namespace llvm {
 
-class DILocation;
 class Value;
 class Function;
 class MachineRegisterInfo;
 class MachineFrameInfo;
 class MachineConstantPool;
 class MachineJumpTableInfo;
+class MachineModuleInfo;
 class MCContext;
 class Pass;
 class TargetMachine;
@@ -70,10 +70,11 @@ struct MachineFunctionInfo {
 };
 
 class MachineFunction {
-  Function *Fn;
+  const Function *Fn;
   const TargetMachine &Target;
   MCContext &Ctx;
-
+  MachineModuleInfo &MMI;
+  
   // RegInfo - Information about each register in use in the function.
   MachineRegisterInfo *RegInfo;
 
@@ -108,34 +109,27 @@ class MachineFunction {
   typedef ilist<MachineBasicBlock> BasicBlockListType;
   BasicBlockListType BasicBlocks;
 
-  // Default debug location. Used to print out the debug label at the beginning
-  // of a function.
-  DebugLoc DefaultDebugLoc;
-
-  // Tracks debug locations.
-  DebugLocTracker DebugLocInfo;
-
   /// FunctionNumber - This provides a unique ID for each function emitted in
   /// this translation unit.
   ///
   unsigned FunctionNumber;
   
-  // The alignment of the function.
+  /// The alignment of the function.
   unsigned Alignment;
 
   MachineFunction(const MachineFunction &); // DO NOT IMPLEMENT
   void operator=(const MachineFunction&);   // DO NOT IMPLEMENT
-
 public:
-  MachineFunction(Function *Fn, const TargetMachine &TM, unsigned FunctionNum,
-                  MCContext &Ctx);
+  MachineFunction(const Function *Fn, const TargetMachine &TM,
+                  unsigned FunctionNum, MachineModuleInfo &MMI);
   ~MachineFunction();
 
+  MachineModuleInfo &getMMI() const { return MMI; }
   MCContext &getContext() const { return Ctx; }
   
   /// getFunction - Return the LLVM function that this machine code represents
   ///
-  Function *getFunction() const { return Fn; }
+  const Function *getFunction() const { return Fn; }
 
   /// getFunctionNumber - Return a unique ID for the current function.
   ///
@@ -396,25 +390,6 @@ public:
   /// normal 'L' label is returned.
   MCSymbol *getJTISymbol(unsigned JTI, MCContext &Ctx, 
                          bool isLinkerPrivate = false) const;
-  
-  
-  //===--------------------------------------------------------------------===//
-  // Debug location.
-  //
-
-  /// getDILocation - Get the DILocation for a given DebugLoc object.
-  DILocation getDILocation(DebugLoc DL) const;
-
-  /// getDefaultDebugLoc - Get the default debug location for the machine
-  /// function.
-  DebugLoc getDefaultDebugLoc() const { return DefaultDebugLoc; }
-
-  /// setDefaultDebugLoc - Get the default debug location for the machine
-  /// function.
-  void setDefaultDebugLoc(DebugLoc DL) { DefaultDebugLoc = DL; }
-
-  /// getDebugLocInfo - Get the debug info location tracker.
-  DebugLocTracker &getDebugLocInfo() { return DebugLocInfo; }
 };
 
 //===--------------------------------------------------------------------===//

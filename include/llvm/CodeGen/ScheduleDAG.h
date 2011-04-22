@@ -27,7 +27,6 @@ namespace llvm {
   class SUnit;
   class MachineConstantPool;
   class MachineFunction;
-  class MachineModuleInfo;
   class MachineRegisterInfo;
   class MachineInstr;
   class TargetRegisterInfo;
@@ -35,7 +34,6 @@ namespace llvm {
   class SDNode;
   class TargetInstrInfo;
   class TargetInstrDesc;
-  class TargetLowering;
   class TargetMachine;
   class TargetRegisterClass;
   template<class Graph> class GraphWriter;
@@ -457,10 +455,8 @@ namespace llvm {
     const TargetMachine &TM;              // Target processor
     const TargetInstrInfo *TII;           // Target instruction information
     const TargetRegisterInfo *TRI;        // Target processor register info
-    const TargetLowering *TLI;            // Target lowering info
     MachineFunction &MF;                  // Machine function
     MachineRegisterInfo &MRI;             // Virtual/real register map
-    MachineConstantPool *ConstPool;       // Target constant pool
     std::vector<SUnit*> Sequence;         // The schedule. Null SUnit*'s
                                           // represent noop instructions.
     std::vector<SUnit> SUnits;            // The scheduling units.
@@ -479,8 +475,7 @@ namespace llvm {
     /// EmitSchedule - Insert MachineInstrs into the MachineBasicBlock
     /// according to the order specified in Sequence.
     ///
-    virtual MachineBasicBlock*
-    EmitSchedule(DenseMap<MachineBasicBlock*, MachineBasicBlock*>*) = 0;
+    virtual MachineBasicBlock *EmitSchedule() = 0;
 
     void dumpSchedule() const;
 

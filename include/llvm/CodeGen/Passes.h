@@ -21,6 +21,7 @@
 namespace llvm {
 
   class FunctionPass;
+  class MachineFunctionPass;
   class PassInfo;
   class TargetLowering;
   class RegisterCoalescer;
@@ -36,8 +37,9 @@ namespace llvm {
 
   /// MachineFunctionPrinter pass - This pass prints out the machine function to
   /// the given stream, as a debugging tool.
-  FunctionPass *createMachineFunctionPrinterPass(raw_ostream &OS,
-                                                 const std::string &Banner ="");
+  MachineFunctionPass *
+  createMachineFunctionPrinterPass(raw_ostream &OS,
+                                   const std::string &Banner ="");
 
   /// MachineLoopInfo pass - This pass is a loop analysis pass.
   /// 
@@ -92,6 +94,11 @@ namespace llvm {
   /// allocator, but not as good as a global allocator.
   ///
   FunctionPass *createLocalRegisterAllocator();
+
+  /// FastRegisterAllocation Pass - This pass register allocates as fast as
+  /// possible. It is best suited for debug code where live ranges are short.
+  ///
+  FunctionPass *createFastRegisterAllocator();
 
   /// LinearScanRegisterAllocation Pass - This pass implements the linear scan
   /// register allocation algorithm, a global register allocator.
@@ -168,7 +175,7 @@ namespace llvm {
 
   /// createMachineLICMPass - This pass performs LICM on machine instructions.
   /// 
-  FunctionPass *createMachineLICMPass();
+  FunctionPass *createMachineLICMPass(bool PreRegAlloc = true);
 
   /// createMachineSinkingPass - This pass performs sinking on machine
   /// instructions.
@@ -197,7 +204,7 @@ namespace llvm {
 
   /// createDwarfEHPass - This pass mulches exception handling code into a form
   /// adapted to code generation.  Required if using dwarf exception handling.
-  FunctionPass *createDwarfEHPass(const TargetLowering *tli, bool fast);
+  FunctionPass *createDwarfEHPass(const TargetMachine *tm, bool fast);
 
   /// createSjLjEHPass - This pass adapts exception handling code to use
   /// the GCC-style builtin setjmp/longjmp (sjlj) to handling EH control flow.

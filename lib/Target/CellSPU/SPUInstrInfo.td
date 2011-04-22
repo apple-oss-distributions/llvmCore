@@ -655,7 +655,7 @@ def SFHvec:
 def SFHr16:
     RRForm<0b00010010000, (outs R16C:$rT), (ins R16C:$rA, R16C:$rB),
       "sfh\t$rT, $rA, $rB", IntegerOp,
-      [(set R16C:$rT, (sub R16C:$rA, R16C:$rB))]>;
+      [(set R16C:$rT, (sub R16C:$rB, R16C:$rA))]>;
 
 def SFHIvec:
     RI10Form<0b10110000, (outs VECREG:$rT), (ins VECREG:$rA, s10imm:$val),
@@ -670,11 +670,11 @@ def SFHIr16 : RI10Form<0b10110000, (outs R16C:$rT), (ins R16C:$rA, s10imm:$val),
 def SFvec : RRForm<0b00000010000, (outs VECREG:$rT),
                                   (ins VECREG:$rA, VECREG:$rB),
   "sf\t$rT, $rA, $rB", IntegerOp,
-  [(set (v4i32 VECREG:$rT), (sub (v4i32 VECREG:$rA), (v4i32 VECREG:$rB)))]>;
+  [(set (v4i32 VECREG:$rT), (sub (v4i32 VECREG:$rB), (v4i32 VECREG:$rA)))]>;
 
 def SFr32 : RRForm<0b00000010000, (outs R32C:$rT), (ins R32C:$rA, R32C:$rB),
   "sf\t$rT, $rA, $rB", IntegerOp,
-  [(set R32C:$rT, (sub R32C:$rA, R32C:$rB))]>;
+  [(set R32C:$rT, (sub R32C:$rB, R32C:$rA))]>;
 
 def SFIvec:
     RI10Form<0b00110000, (outs VECREG:$rT), (ins VECREG:$rA, s10imm:$val),
@@ -1133,16 +1133,14 @@ class XSBHInst<dag OOL, dag IOL, list<dag> pattern>:
       "xsbh\t$rDst, $rSrc",
       IntegerOp, pattern>;
 
-class XSBHVecInst<ValueType vectype>:
-    XSBHInst<(outs VECREG:$rDst), (ins VECREG:$rSrc),
-      [(set (v8i16 VECREG:$rDst), (sext (vectype VECREG:$rSrc)))]>;
-
 class XSBHInRegInst<RegisterClass rclass, list<dag> pattern>:
     XSBHInst<(outs rclass:$rDst), (ins rclass:$rSrc),
              pattern>;
 
 multiclass ExtendByteHalfword {
-  def v16i8:     XSBHVecInst<v8i16>;
+  def v16i8:     XSBHInst<(outs VECREG:$rDst), (ins VECREG:$rSrc),
+                          [
+                  /*(set (v8i16 VECREG:$rDst), (sext (v8i16 VECREG:$rSrc)))*/]>;
   def r8:        XSBHInst<(outs R16C:$rDst), (ins R8C:$rSrc),
                           [(set R16C:$rDst, (sext R8C:$rSrc))]>;
   def r16:       XSBHInRegInst<R16C,
@@ -1200,8 +1198,8 @@ class XSWDInst<dag OOL, dag IOL, list<dag> pattern>:
       
 class XSWDVecInst<ValueType in_vectype, ValueType out_vectype>:
     XSWDInst<(outs VECREG:$rDst), (ins VECREG:$rSrc),
-             [(set (out_vectype VECREG:$rDst),
-                   (sext (out_vectype VECREG:$rSrc)))]>;
+             [/*(set (out_vectype VECREG:$rDst),
+                   (sext (out_vectype VECREG:$rSrc)))*/]>;
       
 class XSWDRegInst<RegisterClass in_rclass, RegisterClass out_rclass>:
     XSWDInst<(outs out_rclass:$rDst), (ins in_rclass:$rSrc),
@@ -1270,7 +1268,12 @@ multiclass BitwiseAnd
 
 defm AND : BitwiseAnd;
 
-// N.B.: vnot_conv is one of those special target selection pattern fragments,
+
+def vnot_cell_conv : PatFrag<(ops node:$in),
+                             (xor node:$in, (bitconvert (v4i32 immAllOnesV)))>;
+
+// N.B.: vnot_cell_conv is one of those special target selection pattern
+// fragments,
 // in which we expect there to be a bit_convert on the constant. Bear in mind
 // that llvm translates "not <reg>" to "xor <reg>, -1" (or in this case, a
 // constant -1 vector.)
@@ -1303,7 +1306,7 @@ multiclass AndComplement
   def r8:   ANDCRegInst<R8C>;
 
   // Sometimes, the xor pattern has a bitcast constant:
-  def v16i8_conv: ANDCVecInst<v16i8, vnot_conv>;
+  def v16i8_conv: ANDCVecInst<v16i8, vnot_cell_conv>;
 }
 
 defm ANDC : AndComplement;
@@ -1936,7 +1939,7 @@ multiclass SelectBits
   def v16i8: SELBVecInst<v16i8>;
   def v8i16: SELBVecInst<v8i16>;
   def v4i32: SELBVecInst<v4i32>;
-  def v2i64: SELBVecInst<v2i64, vnot_conv>;
+  def v2i64: SELBVecInst<v2i64, vnot_cell_conv>;
 
   def r128:  SELBRegInst<GPRC>;
   def r64:   SELBRegInst<R64C>;
@@ -4146,7 +4149,7 @@ def CFSif32 :
 def FESDvec :
     RRForm_1<0b00011101110, (outs VECREG:$rT), (ins VECREG:$rA),
       "fesd\t$rT, $rA", SPrecFP,
-      [(set (v2f64 VECREG:$rT), (fextend (v4f32 VECREG:$rA)))]>;
+      [/*(set (v2f64 VECREG:$rT), (fextend (v4f32 VECREG:$rA)))*/]>;
 
 def FESDf32 :
     RRForm_1<0b00011101110, (outs R64FP:$rT), (ins R32FP:$rA),
@@ -4375,7 +4378,7 @@ def : Pat<(v2f64 (bitconvert (v16i8 VECREG:$src))), (v2f64 VECREG:$src)>;
 def : Pat<(v2f64 (bitconvert (v8i16 VECREG:$src))), (v2f64 VECREG:$src)>;
 def : Pat<(v2f64 (bitconvert (v4i32 VECREG:$src))), (v2f64 VECREG:$src)>;
 def : Pat<(v2f64 (bitconvert (v2i64 VECREG:$src))), (v2f64 VECREG:$src)>;
-def : Pat<(v2f64 (bitconvert (v2f64 VECREG:$src))), (v2f64 VECREG:$src)>;
+def : Pat<(v2f64 (bitconvert (v4f32 VECREG:$src))), (v2f64 VECREG:$src)>;
 
 def : Pat<(i128 (bitconvert (v16i8 VECREG:$src))),
           (ORi128_vec VECREG:$src)>;

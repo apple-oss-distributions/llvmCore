@@ -36,9 +36,12 @@
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
-using namespace llvm;
 
+namespace llvm {
 extern cl::opt<bool> ReuseFrameIndexVals;
+}
+
+using namespace llvm;
 
 Thumb1RegisterInfo::Thumb1RegisterInfo(const ARMBaseInstrInfo &tii,
                                        const ARMSubtarget &sti)
@@ -56,7 +59,7 @@ void Thumb1RegisterInfo::emitLoadConstPool(MachineBasicBlock &MBB,
                                            unsigned PredReg) const {
   MachineFunction &MF = *MBB.getParent();
   MachineConstantPool *ConstantPool = MF.getConstantPool();
-  Constant *C = ConstantInt::get(
+  const Constant *C = ConstantInt::get(
           Type::getInt32Ty(MBB.getParent()->getFunction()->getContext()), Val);
   unsigned Idx = ConstantPool->getConstantPoolIndex(C, 4);
 
@@ -398,7 +401,7 @@ Thumb1RegisterInfo::saveScavengerRegister(MachineBasicBlock &MBB,
   // off the frame pointer (if, for example, there are alloca() calls in
   // the function, the offset will be negative. Use R12 instead since that's
   // a call clobbered register that we know won't be used in Thumb1 mode.
-  DebugLoc DL = DebugLoc::getUnknownLoc();
+  DebugLoc DL;
   BuildMI(MBB, I, DL, TII.get(ARM::tMOVtgpr2gpr)).
     addReg(ARM::R12, RegState::Define).addReg(Reg, RegState::Kill);
 
@@ -459,6 +462,13 @@ Thumb1RegisterInfo::eliminateFrameIndex(MachineBasicBlock::iterator II,
     // pointer instead.
     FrameReg = getFrameRegister(MF);
     Offset -= AFI->getFramePtrSpillOffset();
+  }
+
+  // Special handling of dbg_value instructions.
+  if (MI.isDebugValue()) {
+    MI.getOperand(i).  ChangeToRegister(FrameReg, false /*isDef*/);
+    MI.getOperand(i+1).ChangeToImmediate(Offset);
+    return 0;
   }
 
   unsigned Opcode = MI.getOpcode();
@@ -685,8 +695,7 @@ void Thumb1RegisterInfo::emitPrologue(MachineFunction &MF) const {
   unsigned VARegSaveSize = AFI->getVarArgsRegSaveSize();
   unsigned NumBytes = MFI->getStackSize();
   const std::vector<CalleeSavedInfo> &CSI = MFI->getCalleeSavedInfo();
-  DebugLoc dl = (MBBI != MBB.end() ?
-                 MBBI->getDebugLoc() : DebugLoc::getUnknownLoc());
+  DebugLoc dl = MBBI != MBB.end() ? MBBI->getDebugLoc() : DebugLoc();
 
   // Thumb add/sub sp, imm8 instructions implicitly multiply the offset by 4.
   NumBytes = (NumBytes + 3) & ~3;

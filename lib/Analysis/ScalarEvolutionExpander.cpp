@@ -192,7 +192,7 @@ static bool FactorOutConstant(const SCEV *&S,
 
   // x/x == 1.
   if (S == Factor) {
-    S = SE.getIntegerSCEV(1, S->getType());
+    S = SE.getConstant(S->getType(), 1);
     return true;
   }
 
@@ -232,9 +232,7 @@ static bool FactorOutConstant(const SCEV *&S,
       const SCEVConstant *FC = cast<SCEVConstant>(Factor);
       if (const SCEVConstant *C = dyn_cast<SCEVConstant>(M->getOperand(0)))
         if (!C->getValue()->getValue().srem(FC->getValue()->getValue())) {
-          const SmallVectorImpl<const SCEV *> &MOperands = M->getOperands();
-          SmallVector<const SCEV *, 4> NewMulOps(MOperands.begin(),
-                                                 MOperands.end());
+          SmallVector<const SCEV *, 4> NewMulOps(M->op_begin(), M->op_end());
           NewMulOps[0] =
             SE.getConstant(C->getValue()->getValue().sdiv(
                                                    FC->getValue()->getValue()));
@@ -246,12 +244,10 @@ static bool FactorOutConstant(const SCEV *&S,
       // Mul's operands. If so, we can just remove it.
       for (unsigned i = 0, e = M->getNumOperands(); i != e; ++i) {
         const SCEV *SOp = M->getOperand(i);
-        const SCEV *Remainder = SE.getIntegerSCEV(0, SOp->getType());
+        const SCEV *Remainder = SE.getConstant(SOp->getType(), 0);
         if (FactorOutConstant(SOp, Remainder, Factor, SE, TD) &&
             Remainder->isZero()) {
-          const SmallVectorImpl<const SCEV *> &MOperands = M->getOperands();
-          SmallVector<const SCEV *, 4> NewMulOps(MOperands.begin(),
-                                                 MOperands.end());
+          SmallVector<const SCEV *, 4> NewMulOps(M->op_begin(), M->op_end());
           NewMulOps[i] = SOp;
           S = SE.getMulExpr(NewMulOps);
           return true;
@@ -263,7 +259,7 @@ static bool FactorOutConstant(const SCEV *&S,
   // In an AddRec, check if both start and step are divisible.
   if (const SCEVAddRecExpr *A = dyn_cast<SCEVAddRecExpr>(S)) {
     const SCEV *Step = A->getStepRecurrence(SE);
-    const SCEV *StepRem = SE.getIntegerSCEV(0, Step->getType());
+    const SCEV *StepRem = SE.getConstant(Step->getType(), 0);
     if (!FactorOutConstant(Step, StepRem, Factor, SE, TD))
       return false;
     if (!StepRem->isZero())
@@ -293,17 +289,15 @@ static void SimplifyAddOperands(SmallVectorImpl<const SCEV *> &Ops,
   SmallVector<const SCEV *, 8> AddRecs(Ops.end() - NumAddRecs, Ops.end());
   // Let ScalarEvolution sort and simplify the non-addrecs list.
   const SCEV *Sum = NoAddRecs.empty() ?
-                    SE.getIntegerSCEV(0, Ty) :
+                    SE.getConstant(Ty, 0) :
                     SE.getAddExpr(NoAddRecs);
   // If it returned an add, use the operands. Otherwise it simplified
   // the sum into a single value, so just use that.
+  Ops.clear();
   if (const SCEVAddExpr *Add = dyn_cast<SCEVAddExpr>(Sum))
-    Ops = Add->getOperands();
-  else {
-    Ops.clear();
-    if (!Sum->isZero())
-      Ops.push_back(Sum);
-  }
+    Ops.insert(Ops.end(), Add->op_begin(), Add->op_end());
+  else if (!Sum->isZero())
+    Ops.push_back(Sum);
   // Then append the addrecs.
   Ops.insert(Ops.end(), AddRecs.begin(), AddRecs.end());
 }
@@ -322,7 +316,7 @@ static void SplitAddRecs(SmallVectorImpl<const SCEV *> &Ops,
     while (const SCEVAddRecExpr *A = dyn_cast<SCEVAddRecExpr>(Ops[i])) {
       const SCEV *Start = A->getStart();
       if (Start->isZero()) break;
-      const SCEV *Zero = SE.getIntegerSCEV(0, Ty);
+      const SCEV *Zero = SE.getConstant(Ty, 0);
       AddRecs.push_back(SE.getAddRecExpr(Zero,
                                          A->getStepRecurrence(SE),
                                          A->getLoop()));
@@ -398,7 +392,7 @@ Value *SCEVExpander::expandAddToGEP(const SCEV *const *op_begin,
         SmallVector<const SCEV *, 8> NewOps;
         for (unsigned i = 0, e = Ops.size(); i != e; ++i) {
           const SCEV *Op = Ops[i];
-          const SCEV *Remainder = SE.getIntegerSCEV(0, Ty);
+          const SCEV *Remainder = SE.getConstant(Ty, 0);
           if (FactorOutConstant(Op, Remainder, ElSize, SE, SE.TD)) {
             // Op now has ElSize factored out.
             ScaledOps.push_back(Op);
@@ -648,6 +642,8 @@ static const Loop *GetRelevantLoop(const SCEV *S, LoopInfo &LI,
   llvm_unreachable("Unexpected SCEV type!");
 }
 
+namespace {
+
 /// LoopCompare - Compare loops by PickMostRelevantLoop.
 class LoopCompare {
   DominatorTree &DT;
@@ -673,6 +669,8 @@ public:
     return false;
   }
 };
+
+}
 
 Value *SCEVExpander::visitAddExpr(const SCEVAddExpr *S) {
   const Type *Ty = SE.getEffectiveSCEVType(S->getType());
@@ -711,9 +709,11 @@ Value *SCEVExpander::visitAddExpr(const SCEVAddExpr *S) {
       Sum = expandAddToGEP(NewOps.begin(), NewOps.end(), PTy, Ty, Sum);
     } else if (const PointerType *PTy = dyn_cast<PointerType>(Op->getType())) {
       // The running sum is an integer, and there's a pointer at this level.
-      // Try to form a getelementptr.
+      // Try to form a getelementptr. If the running sum is instructions,
+      // use a SCEVUnknown to avoid re-analyzing them.
       SmallVector<const SCEV *, 4> NewOps;
-      NewOps.push_back(SE.getUnknown(Sum));
+      NewOps.push_back(isa<Instruction>(Sum) ? SE.getUnknown(Sum) :
+                                               SE.getSCEV(Sum));
       for (++I; I != E && I->first == CurLoop; ++I)
         NewOps.push_back(I->second);
       Sum = expandAddToGEP(NewOps.begin(), NewOps.end(), PTy, Ty, expand(Op));
@@ -803,7 +803,7 @@ static void ExposePointerBase(const SCEV *&Base, const SCEV *&Rest,
   while (const SCEVAddRecExpr *A = dyn_cast<SCEVAddRecExpr>(Base)) {
     Base = A->getStart();
     Rest = SE.getAddExpr(Rest,
-                         SE.getAddRecExpr(SE.getIntegerSCEV(0, A->getType()),
+                         SE.getAddRecExpr(SE.getConstant(A->getType(), 0),
                                           A->getStepRecurrence(SE),
                                           A->getLoop()));
   }
@@ -972,9 +972,12 @@ Value *SCEVExpander::expandAddRecExprLiterally(const SCEVAddRecExpr *S) {
   // Determine a normalized form of this expression, which is the expression
   // before any post-inc adjustment is made.
   const SCEVAddRecExpr *Normalized = S;
-  if (L == PostIncLoop) {
-    const SCEV *Step = S->getStepRecurrence(SE);
-    Normalized = cast<SCEVAddRecExpr>(SE.getMinusSCEV(S, Step));
+  if (PostIncLoops.count(L)) {
+    PostIncLoopSet Loops;
+    Loops.insert(L);
+    Normalized =
+      cast<SCEVAddRecExpr>(TransformForPostIncUse(Normalize, S, 0, 0,
+                                                  Loops, SE, *SE.DT));
   }
 
   // Strip off any non-loop-dominating component from the addrec start.
@@ -982,7 +985,7 @@ Value *SCEVExpander::expandAddRecExprLiterally(const SCEVAddRecExpr *S) {
   const SCEV *PostLoopOffset = 0;
   if (!Start->properlyDominates(L->getHeader(), SE.DT)) {
     PostLoopOffset = Start;
-    Start = SE.getIntegerSCEV(0, Normalized->getType());
+    Start = SE.getConstant(Normalized->getType(), 0);
     Normalized =
       cast<SCEVAddRecExpr>(SE.getAddRecExpr(Start,
                                             Normalized->getStepRecurrence(SE),
@@ -992,10 +995,9 @@ Value *SCEVExpander::expandAddRecExprLiterally(const SCEVAddRecExpr *S) {
   // Strip off any non-loop-dominating component from the addrec step.
   const SCEV *Step = Normalized->getStepRecurrence(SE);
   const SCEV *PostLoopScale = 0;
-  if (!Step->hasComputableLoopEvolution(L) &&
-      !Step->dominates(L->getHeader(), SE.DT)) {
+  if (!Step->dominates(L->getHeader(), SE.DT)) {
     PostLoopScale = Step;
-    Step = SE.getIntegerSCEV(1, Normalized->getType());
+    Step = SE.getConstant(Normalized->getType(), 1);
     Normalized =
       cast<SCEVAddRecExpr>(SE.getAddRecExpr(Start, Step,
                                             Normalized->getLoop()));
@@ -1008,7 +1010,7 @@ Value *SCEVExpander::expandAddRecExprLiterally(const SCEVAddRecExpr *S) {
 
   // Accommodate post-inc mode, if necessary.
   Value *Result;
-  if (L != PostIncLoop)
+  if (!PostIncLoops.count(L))
     Result = PN;
   else {
     // In PostInc mode, use the post-incremented value.
@@ -1060,10 +1062,9 @@ Value *SCEVExpander::visitAddRecExpr(const SCEVAddRecExpr *S) {
   if (CanonicalIV &&
       SE.getTypeSizeInBits(CanonicalIV->getType()) >
       SE.getTypeSizeInBits(Ty)) {
-    const SmallVectorImpl<const SCEV *> &Ops = S->getOperands();
-    SmallVector<const SCEV *, 4> NewOps(Ops.size());
-    for (unsigned i = 0, e = Ops.size(); i != e; ++i)
-      NewOps[i] = SE.getAnyExtendExpr(Ops[i], CanonicalIV->getType());
+    SmallVector<const SCEV *, 4> NewOps(S->getNumOperands());
+    for (unsigned i = 0, e = S->getNumOperands(); i != e; ++i)
+      NewOps[i] = SE.getAnyExtendExpr(S->op_begin()[i], CanonicalIV->getType());
     Value *V = expand(SE.getAddRecExpr(NewOps, S->getLoop()));
     BasicBlock *SaveInsertBB = Builder.GetInsertBlock();
     BasicBlock::iterator SaveInsertPt = Builder.GetInsertPoint();
@@ -1078,9 +1079,8 @@ Value *SCEVExpander::visitAddRecExpr(const SCEVAddRecExpr *S) {
 
   // {X,+,F} --> X + {0,+,F}
   if (!S->getStart()->isZero()) {
-    const SmallVectorImpl<const SCEV *> &SOperands = S->getOperands();
-    SmallVector<const SCEV *, 4> NewOps(SOperands.begin(), SOperands.end());
-    NewOps[0] = SE.getIntegerSCEV(0, Ty);
+    SmallVector<const SCEV *, 4> NewOps(S->op_begin(), S->op_end());
+    NewOps[0] = SE.getConstant(Ty, 0);
     const SCEV *Rest = SE.getAddRecExpr(NewOps, L);
 
     // Turn things like ptrtoint+arithmetic+inttoptr into GEP. See the
@@ -1108,7 +1108,7 @@ Value *SCEVExpander::visitAddRecExpr(const SCEVAddRecExpr *S) {
 
   // {0,+,1} --> Insert a canonical induction variable into the loop!
   if (S->isAffine() &&
-      S->getOperand(1) == SE.getIntegerSCEV(1, Ty)) {
+      S->getOperand(1) == SE.getConstant(Ty, 1)) {
     // If there's a canonical IV, just use it.
     if (CanonicalIV) {
       assert(Ty == SE.getEffectiveSCEVType(CanonicalIV->getType()) &&
@@ -1282,7 +1282,7 @@ Value *SCEVExpander::expand(const SCEV *S) {
       // If the SCEV is computable at this level, insert it into the header
       // after the PHIs (and after any other instructions that we've inserted
       // there) so that it is guaranteed to dominate any user inside the loop.
-      if (L && S->hasComputableLoopEvolution(L) && L != PostIncLoop)
+      if (L && S->hasComputableLoopEvolution(L) && !PostIncLoops.count(L))
         InsertPt = L->getHeader()->getFirstNonPHI();
       while (isInsertedInstruction(InsertPt) || isa<DbgInfoIntrinsic>(InsertPt))
         InsertPt = llvm::next(BasicBlock::iterator(InsertPt));
@@ -1304,7 +1304,7 @@ Value *SCEVExpander::expand(const SCEV *S) {
   Value *V = visit(S);
 
   // Remember the expanded value for this SCEV at this location.
-  if (!PostIncLoop)
+  if (PostIncLoops.empty())
     InsertedExpressions[std::make_pair(S, InsertPt)] = V;
 
   restoreInsertPoint(SaveInsertBB, SaveInsertPt);
@@ -1312,7 +1312,7 @@ Value *SCEVExpander::expand(const SCEV *S) {
 }
 
 void SCEVExpander::rememberInstruction(Value *I) {
-  if (!PostIncLoop)
+  if (PostIncLoops.empty())
     InsertedValues.insert(I);
 
   // If we just claimed an existing instruction and that instruction had
@@ -1342,8 +1342,8 @@ Value *
 SCEVExpander::getOrInsertCanonicalInductionVariable(const Loop *L,
                                                     const Type *Ty) {
   assert(Ty->isIntegerTy() && "Can only insert integer induction variables!");
-  const SCEV *H = SE.getAddRecExpr(SE.getIntegerSCEV(0, Ty),
-                                   SE.getIntegerSCEV(1, Ty), L);
+  const SCEV *H = SE.getAddRecExpr(SE.getConstant(Ty, 0),
+                                   SE.getConstant(Ty, 1), L);
   BasicBlock *SaveInsertBB = Builder.GetInsertBlock();
   BasicBlock::iterator SaveInsertPt = Builder.GetInsertPoint();
   Value *V = expandCodeFor(H, 0, L->getHeader()->begin());

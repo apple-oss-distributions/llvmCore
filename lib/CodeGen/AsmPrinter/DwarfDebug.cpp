@@ -13,6 +13,8 @@
 
 #define DEBUG_TYPE "dwarfdebug"
 #include "DwarfDebug.h"
+#include "DIE.h"
+#include "llvm/Constants.h"
 #include "llvm/Module.h"
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/MachineModuleInfo.h"
@@ -24,9 +26,13 @@
 #include "llvm/Target/TargetData.h"
 #include "llvm/Target/TargetFrameInfo.h"
 #include "llvm/Target/TargetLoweringObjectFile.h"
+#include "llvm/Target/TargetMachine.h"
 #include "llvm/Target/TargetRegisterInfo.h"
+#include "llvm/Target/TargetOptions.h"
+#include "llvm/Analysis/DebugInfo.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringExtras.h"
+#include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/ValueHandle.h"
@@ -34,6 +40,21 @@
 #include "llvm/Support/Timer.h"
 #include "llvm/System/Path.h"
 using namespace llvm;
+
+static cl::opt<bool> PrintDbgScope("print-dbgscope", cl::Hidden,
+     cl::desc("Print DbgScope information for each machine instruction"));
+
+static cl::opt<bool> DisableDebugInfoPrinting("disable-debug-info-print", cl::Hidden,
+     cl::desc("Disable debug info printing"));
+
+static cl::opt<bool> UnknownLocations("use-unknown-locations", cl::Hidden,
+     cl::desc("Make an absense of debug location information explicit."),
+     cl::init(false));
+
+namespace {
+  const char *DWARFGroupName = "DWARF Emission";
+  const char *DbgTimerName = "DWARF Debug Writer";
+} // end anonymous namespace
 
 //===----------------------------------------------------------------------===//
 
@@ -61,12 +82,12 @@ class CompileUnit {
   /// GVToDieMap - Tracks the mapping of unit level debug informaton
   /// variables to debug information entries.
   /// FIXME : Rename GVToDieMap -> NodeToDieMap
-  DenseMap<MDNode *, DIE *> GVToDieMap;
+  DenseMap<const MDNode *, DIE *> GVToDieMap;
 
   /// GVToDIEEntryMap - Tracks the mapping of unit level debug informaton
   /// descriptors to debug information entries using a DIEEntry proxy.
   /// FIXME : Rename
-  DenseMap<MDNode *, DIEEntry *> GVToDIEEntryMap;
+  DenseMap<const MDNode *, DIEEntry *> GVToDIEEntryMap;
 
   /// Globals - A map of globally visible named entities for this unit.
   ///
@@ -92,34 +113,34 @@ public:
 
   /// addGlobal - Add a new global entity to the compile unit.
   ///
-  void addGlobal(const std::string &Name, DIE *Die) { Globals[Name] = Die; }
+  void addGlobal(StringRef Name, DIE *Die) { Globals[Name] = Die; }
 
   /// addGlobalType - Add a new global type to the compile unit.
   ///
-  void addGlobalType(const std::string &Name, DIE *Die) { 
+  void addGlobalType(StringRef Name, DIE *Die) { 
     GlobalTypes[Name] = Die; 
   }
 
   /// getDIE - Returns the debug information entry map slot for the
   /// specified debug variable.
-  DIE *getDIE(MDNode *N) { return GVToDieMap.lookup(N); }
+  DIE *getDIE(const MDNode *N) { return GVToDieMap.lookup(N); }
 
   /// insertDIE - Insert DIE into the map.
-  void insertDIE(MDNode *N, DIE *D) {
+  void insertDIE(const MDNode *N, DIE *D) {
     GVToDieMap.insert(std::make_pair(N, D));
   }
 
   /// getDIEEntry - Returns the debug information entry for the speciefied
   /// debug variable.
-  DIEEntry *getDIEEntry(MDNode *N) { 
-    DenseMap<MDNode *, DIEEntry *>::iterator I = GVToDIEEntryMap.find(N);
+  DIEEntry *getDIEEntry(const MDNode *N) { 
+    DenseMap<const MDNode *, DIEEntry *>::iterator I = GVToDIEEntryMap.find(N);
     if (I == GVToDIEEntryMap.end())
       return NULL;
     return I->second;
   }
 
   /// insertDIEEntry - Insert debug information entry into the map.
-  void insertDIEEntry(MDNode *N, DIEEntry *E) {
+  void insertDIEEntry(const MDNode *N, DIEEntry *E) {
     GVToDIEEntryMap.insert(std::make_pair(N, E));
   }
 
@@ -149,24 +170,39 @@ class DbgVariable {
   DIVariable Var;                    // Variable Descriptor.
   unsigned FrameIndex;               // Variable frame index.
   const MachineInstr *DbgValueMInsn; // DBG_VALUE
+  // DbgValueLabel - DBG_VALUE is effective from this label.
+  MCSymbol *DbgValueLabel;
   DbgVariable *const AbstractVar;    // Abstract variable for this variable.
   DIE *TheDIE;
 public:
   // AbsVar may be NULL.
   DbgVariable(DIVariable V, unsigned I, DbgVariable *AbsVar)
-    : Var(V), FrameIndex(I), DbgValueMInsn(0), AbstractVar(AbsVar), TheDIE(0) {}
+    : Var(V), FrameIndex(I), DbgValueMInsn(0), 
+      DbgValueLabel(0), AbstractVar(AbsVar), TheDIE(0) {}
   DbgVariable(DIVariable V, const MachineInstr *MI, DbgVariable *AbsVar)
-    : Var(V), FrameIndex(0), DbgValueMInsn(MI), AbstractVar(AbsVar), TheDIE(0)
+    : Var(V), FrameIndex(0), DbgValueMInsn(MI), DbgValueLabel(0),
+      AbstractVar(AbsVar), TheDIE(0)
     {}
 
   // Accessors.
   DIVariable getVariable()           const { return Var; }
   unsigned getFrameIndex()           const { return FrameIndex; }
   const MachineInstr *getDbgValue()  const { return DbgValueMInsn; }
+  MCSymbol *getDbgValueLabel()       const { return DbgValueLabel; }
+  void setDbgValueLabel(MCSymbol *L)       { DbgValueLabel = L; }
   DbgVariable *getAbstractVariable() const { return AbstractVar; }
   void setDIE(DIE *D)                      { TheDIE = D; }
   DIE *getDIE()                      const { return TheDIE; }
+  bool hasLocation()                       { 
+    return DbgValueMInsn || FrameIndex != ~0U; 
+  }
 };
+
+//===----------------------------------------------------------------------===//
+/// DbgRange - This is used to track range of instructions with identical
+/// debug info scope.
+///
+typedef std::pair<const MachineInstr *, const MachineInstr *> DbgRange;
 
 //===----------------------------------------------------------------------===//
 /// DbgScope - This class is used to track scope information.
@@ -175,44 +211,82 @@ class DbgScope {
   DbgScope *Parent;                   // Parent to this scope.
   DIDescriptor Desc;                  // Debug info descriptor for scope.
   // Location at which this scope is inlined.
-  AssertingVH<MDNode> InlinedAtLocation;  
+  AssertingVH<const MDNode> InlinedAtLocation;  
   bool AbstractScope;                 // Abstract Scope
-  MCSymbol *StartLabel;               // Label ID of the beginning of scope.
-  MCSymbol *EndLabel;                 // Label ID of the end of scope.
   const MachineInstr *LastInsn;       // Last instruction of this scope.
   const MachineInstr *FirstInsn;      // First instruction of this scope.
+  unsigned DFSIn, DFSOut;
   // Scopes defined in scope.  Contents not owned.
   SmallVector<DbgScope *, 4> Scopes;
   // Variables declared in scope.  Contents owned.
   SmallVector<DbgVariable *, 8> Variables;
-
+  SmallVector<DbgRange, 4> Ranges;
   // Private state for dump()
   mutable unsigned IndentLevel;
 public:
-  DbgScope(DbgScope *P, DIDescriptor D, MDNode *I = 0)
+  DbgScope(DbgScope *P, DIDescriptor D, const MDNode *I = 0)
     : Parent(P), Desc(D), InlinedAtLocation(I), AbstractScope(false),
-      StartLabel(0), EndLabel(0),
-      LastInsn(0), FirstInsn(0), IndentLevel(0) {}
+      LastInsn(0), FirstInsn(0),
+      DFSIn(0), DFSOut(0), IndentLevel(0) {}
   virtual ~DbgScope();
 
   // Accessors.
   DbgScope *getParent()          const { return Parent; }
   void setParent(DbgScope *P)          { Parent = P; }
   DIDescriptor getDesc()         const { return Desc; }
-  MDNode *getInlinedAt()         const { return InlinedAtLocation; }
-  MDNode *getScopeNode()         const { return Desc.getNode(); }
-  MCSymbol *getStartLabel()      const { return StartLabel; }
-  MCSymbol *getEndLabel()        const { return EndLabel; }
+  const MDNode *getInlinedAt()         const { return InlinedAtLocation; }
+  const MDNode *getScopeNode()         const { return Desc; }
   const SmallVector<DbgScope *, 4> &getScopes() { return Scopes; }
   const SmallVector<DbgVariable *, 8> &getVariables() { return Variables; }
-  void setStartLabel(MCSymbol *S) { StartLabel = S; }
-  void setEndLabel(MCSymbol *E)   { EndLabel = E; }
-  void setLastInsn(const MachineInstr *MI) { LastInsn = MI; }
-  const MachineInstr *getLastInsn()      { return LastInsn; }
-  void setFirstInsn(const MachineInstr *MI) { FirstInsn = MI; }
+  const SmallVector<DbgRange, 4> &getRanges() { return Ranges; }
+
+  /// openInsnRange - This scope covers instruction range starting from MI.
+  void openInsnRange(const MachineInstr *MI) {
+    if (!FirstInsn) 
+      FirstInsn = MI;
+    
+    if (Parent)
+      Parent->openInsnRange(MI);
+  }
+
+  /// extendInsnRange - Extend the current instruction range covered by 
+  /// this scope.
+  void extendInsnRange(const MachineInstr *MI) {
+    assert (FirstInsn && "MI Range is not open!");
+    LastInsn = MI;
+    if (Parent)
+      Parent->extendInsnRange(MI);
+  }
+
+  /// closeInsnRange - Create a range based on FirstInsn and LastInsn collected
+  /// until now. This is used when a new scope is encountered while walking
+  /// machine instructions.
+  void closeInsnRange(DbgScope *NewScope = NULL) {
+    assert (LastInsn && "Last insn missing!");
+    Ranges.push_back(DbgRange(FirstInsn, LastInsn));
+    FirstInsn = NULL;    
+    LastInsn = NULL;
+    // If Parent dominates NewScope then do not close Parent's instruction 
+    // range.
+    if (Parent && (!NewScope || !Parent->dominates(NewScope)))
+      Parent->closeInsnRange(NewScope);
+  }
+
   void setAbstractScope() { AbstractScope = true; }
   bool isAbstractScope() const { return AbstractScope; }
-  const MachineInstr *getFirstInsn()      { return FirstInsn; }
+
+  // Depth First Search support to walk and mainpluate DbgScope hierarchy.
+  unsigned getDFSOut() const { return DFSOut; }
+  void setDFSOut(unsigned O) { DFSOut = O; }
+  unsigned getDFSIn() const  { return DFSIn; }
+  void setDFSIn(unsigned I)  { DFSIn = I; }
+  bool dominates(const DbgScope *S) {
+    if (S == this) 
+      return true;
+    if (DFSIn < S->getDFSIn() && DFSOut > S->getDFSOut())
+      return true;
+    return false;
+  }
 
   /// addScope - Add a scope to the scope.
   ///
@@ -222,55 +296,19 @@ public:
   ///
   void addVariable(DbgVariable *V) { Variables.push_back(V); }
 
-  void fixInstructionMarkers(DenseMap<const MachineInstr *, 
-                             unsigned> &MIIndexMap) {
-    assert (getFirstInsn() && "First instruction is missing!");
-    
-    // Use the end of last child scope as end of this scope.
-    const SmallVector<DbgScope *, 4> &Scopes = getScopes();
-    const MachineInstr *LastInsn = getFirstInsn();
-    unsigned LIndex = 0;
-    if (Scopes.empty()) {
-      assert (getLastInsn() && "Inner most scope does not have last insn!");
-      return;
-    }
-    for (SmallVector<DbgScope *, 4>::const_iterator SI = Scopes.begin(),
-           SE = Scopes.end(); SI != SE; ++SI) {
-      DbgScope *DS = *SI;
-      DS->fixInstructionMarkers(MIIndexMap);
-      const MachineInstr *DSLastInsn = DS->getLastInsn();
-      unsigned DSI = MIIndexMap[DSLastInsn];
-      if (DSI > LIndex) {
-        LastInsn = DSLastInsn;
-        LIndex = DSI;
-      }
-    }
-
-    unsigned CurrentLastInsnIndex = 0;
-    if (const MachineInstr *CL = getLastInsn()) 
-      CurrentLastInsnIndex = MIIndexMap[CL];
-    unsigned FIndex = MIIndexMap[getFirstInsn()];
-
-    // Set LastInsn as the last instruction for this scope only if
-    // it follows 
-    //  1) this scope's first instruction and
-    //  2) current last instruction for this scope, if any.
-    if (LIndex >= CurrentLastInsnIndex && LIndex >= FIndex)
-      setLastInsn(LastInsn);
-  }
-
 #ifndef NDEBUG
   void dump() const;
 #endif
 };
 
+} // end llvm namespace
+
 #ifndef NDEBUG
 void DbgScope::dump() const {
   raw_ostream &err = dbgs();
   err.indent(IndentLevel);
-  MDNode *N = Desc.getNode();
+  const MDNode *N = Desc;
   N->dump();
-  err << " [" << StartLabel << ", " << EndLabel << "]\n";
   if (AbstractScope)
     err << "Abstract Scope\n";
 
@@ -290,22 +328,26 @@ DbgScope::~DbgScope() {
     delete Variables[j];
 }
 
-} // end llvm namespace
-
-DwarfDebug::DwarfDebug(raw_ostream &OS, AsmPrinter *A, const MCAsmInfo *T)
-  : DwarfPrinter(OS, A, T), ModuleCU(0),
-    AbbreviationsSet(InitAbbreviationsSetSize), Abbreviations(),
-    DIEValues(), SectionSourceLines(), didInitial(false), shouldEmit(false),
-    CurrentFnDbgScope(0), DebugTimer(0) {
+DwarfDebug::DwarfDebug(AsmPrinter *A, Module *M)
+  : Asm(A), MMI(Asm->MMI), FirstCU(0),
+    AbbreviationsSet(InitAbbreviationsSetSize), 
+    CurrentFnDbgScope(0), PrevLabel(NULL) {
   NextStringPoolNumber = 0;
-  if (TimePassesIsEnabled)
-    DebugTimer = new Timer("Dwarf Debug Writer");
+      
+  DwarfFrameSectionSym = DwarfInfoSectionSym = DwarfAbbrevSectionSym = 0;
+  DwarfStrSectionSym = TextSectionSym = 0;
+  DwarfDebugRangeSectionSym = 0;
+  FunctionBeginSym = 0;
+  if (TimePassesIsEnabled) {
+      NamedRegionTimer T(DbgTimerName, DWARFGroupName);
+      beginModule(M);
+  } else {
+      beginModule(M);
+  }
 }
 DwarfDebug::~DwarfDebug() {
-  for (unsigned j = 0, M = DIEValues.size(); j < M; ++j)
-    delete DIEValues[j];
-
-  delete DebugTimer;
+  for (unsigned j = 0, M = DIEBlocks.size(); j < M; ++j)
+    DIEBlocks[j]->~DIEBlock();
 }
 
 MCSymbol *DwarfDebug::getStringPoolEntry(StringRef Str) {
@@ -313,7 +355,7 @@ MCSymbol *DwarfDebug::getStringPoolEntry(StringRef Str) {
   if (Entry.first) return Entry.first;
 
   Entry.second = NextStringPoolNumber++;
-  return Entry.first = getDWLabel("string", Entry.second);
+  return Entry.first = Asm->GetTempSymbol("string", Entry.second);
 }
 
 
@@ -343,8 +385,7 @@ void DwarfDebug::assignAbbrevNumber(DIEAbbrev &Abbrev) {
 /// createDIEEntry - Creates a new DIEEntry to be a proxy for a debug
 /// information entry.
 DIEEntry *DwarfDebug::createDIEEntry(DIE *Entry) {
-  DIEEntry *Value = new DIEEntry(Entry);
-  DIEValues.push_back(Value);
+  DIEEntry *Value = new (DIEValueAllocator) DIEEntry(Entry);
   return Value;
 }
 
@@ -353,8 +394,7 @@ DIEEntry *DwarfDebug::createDIEEntry(DIE *Entry) {
 void DwarfDebug::addUInt(DIE *Die, unsigned Attribute,
                          unsigned Form, uint64_t Integer) {
   if (!Form) Form = DIEInteger::BestForm(false, Integer);
-  DIEValue *Value = new DIEInteger(Integer);
-  DIEValues.push_back(Value);
+  DIEValue *Value = new (DIEValueAllocator) DIEInteger(Integer);
   Die->addValue(Attribute, Form, Value);
 }
 
@@ -363,8 +403,7 @@ void DwarfDebug::addUInt(DIE *Die, unsigned Attribute,
 void DwarfDebug::addSInt(DIE *Die, unsigned Attribute,
                          unsigned Form, int64_t Integer) {
   if (!Form) Form = DIEInteger::BestForm(true, Integer);
-  DIEValue *Value = new DIEInteger(Integer);
-  DIEValues.push_back(Value);
+  DIEValue *Value = new (DIEValueAllocator) DIEInteger(Integer);
   Die->addValue(Attribute, Form, Value);
 }
 
@@ -372,8 +411,7 @@ void DwarfDebug::addSInt(DIE *Die, unsigned Attribute,
 /// keeps string reference. 
 void DwarfDebug::addString(DIE *Die, unsigned Attribute, unsigned Form,
                            StringRef String) {
-  DIEValue *Value = new DIEString(String);
-  DIEValues.push_back(Value);
+  DIEValue *Value = new (DIEValueAllocator) DIEString(String);
   Die->addValue(Attribute, Form, Value);
 }
 
@@ -381,8 +419,7 @@ void DwarfDebug::addString(DIE *Die, unsigned Attribute, unsigned Form,
 ///
 void DwarfDebug::addLabel(DIE *Die, unsigned Attribute, unsigned Form,
                           const MCSymbol *Label) {
-  DIEValue *Value = new DIELabel(Label);
-  DIEValues.push_back(Value);
+  DIEValue *Value = new (DIEValueAllocator) DIELabel(Label);
   Die->addValue(Attribute, Form, Value);
 }
 
@@ -390,25 +427,32 @@ void DwarfDebug::addLabel(DIE *Die, unsigned Attribute, unsigned Form,
 ///
 void DwarfDebug::addDelta(DIE *Die, unsigned Attribute, unsigned Form,
                           const MCSymbol *Hi, const MCSymbol *Lo) {
-  DIEValue *Value = new DIEDelta(Hi, Lo);
-  DIEValues.push_back(Value);
+  DIEValue *Value = new (DIEValueAllocator) DIEDelta(Hi, Lo);
   Die->addValue(Attribute, Form, Value);
 }
+
+/// addDIEEntry - Add a DIE attribute data and value.
+///
+void DwarfDebug::addDIEEntry(DIE *Die, unsigned Attribute, unsigned Form,
+                             DIE *Entry) {
+  Die->addValue(Attribute, Form, createDIEEntry(Entry));
+}
+
 
 /// addBlock - Add block data.
 ///
 void DwarfDebug::addBlock(DIE *Die, unsigned Attribute, unsigned Form,
                           DIEBlock *Block) {
-  Block->ComputeSize(TD);
-  DIEValues.push_back(Block);
+  Block->ComputeSize(Asm);
+  DIEBlocks.push_back(Block); // Memoize so we can call the destructor later on.
   Die->addValue(Attribute, Block->BestForm(), Block);
 }
 
 /// addSourceLine - Add location information to specified debug information
 /// entry.
 void DwarfDebug::addSourceLine(DIE *Die, const DIVariable *V) {
-  // If there is no compile unit specified, don't add a line #.
-  if (!V->getCompileUnit().Verify())
+  // Verify variable.
+  if (!V->Verify())
     return;
 
   unsigned Line = V->getLineNumber();
@@ -421,9 +465,9 @@ void DwarfDebug::addSourceLine(DIE *Die, const DIVariable *V) {
 
 /// addSourceLine - Add location information to specified debug information
 /// entry.
-void DwarfDebug::addSourceLine(DIE *Die, const DIGlobal *G) {
-  // If there is no compile unit specified, don't add a line #.
-  if (!G->getCompileUnit().Verify())
+void DwarfDebug::addSourceLine(DIE *Die, const DIGlobalVariable *G) {
+  // Verify global variable.
+  if (!G->Verify())
     return;
 
   unsigned Line = G->getLineNumber();
@@ -437,8 +481,8 @@ void DwarfDebug::addSourceLine(DIE *Die, const DIGlobal *G) {
 /// addSourceLine - Add location information to specified debug information
 /// entry.
 void DwarfDebug::addSourceLine(DIE *Die, const DISubprogram *SP) {
-  // If there is no compile unit specified, don't add a line #.
-  if (!SP->getCompileUnit().Verify())
+  // Verify subprogram.
+  if (!SP->Verify())
     return;
   // If the line number is 0, don't add it.
   if (SP->getLineNumber() == 0)
@@ -457,9 +501,8 @@ void DwarfDebug::addSourceLine(DIE *Die, const DISubprogram *SP) {
 /// addSourceLine - Add location information to specified debug information
 /// entry.
 void DwarfDebug::addSourceLine(DIE *Die, const DIType *Ty) {
-  // If there is no compile unit specified, don't add a line #.
-  DICompileUnit CU = Ty->getCompileUnit();
-  if (!CU.Verify())
+  // Verify type.
+  if (!Ty->Verify())
     return;
 
   unsigned Line = Ty->getLineNumber();
@@ -475,8 +518,8 @@ void DwarfDebug::addSourceLine(DIE *Die, const DIType *Ty) {
 /// addSourceLine - Add location information to specified debug information
 /// entry.
 void DwarfDebug::addSourceLine(DIE *Die, const DINameSpace *NS) {
-  // If there is no compile unit specified, don't add a line #.
-  if (!NS->getCompileUnit().Verify())
+  // Verify namespace.
+  if (!NS->Verify())
     return;
 
   unsigned Line = NS->getLineNumber();
@@ -523,16 +566,16 @@ DIType DwarfDebug::getBlockByrefType(DIType Ty, std::string Name) {
   unsigned tag = Ty.getTag();
 
   if (tag == dwarf::DW_TAG_pointer_type) {
-    DIDerivedType DTy = DIDerivedType(Ty.getNode());
+    DIDerivedType DTy = DIDerivedType(Ty);
     subType = DTy.getTypeDerivedFrom();
   }
 
-  DICompositeType blockStruct = DICompositeType(subType.getNode());
+  DICompositeType blockStruct = DICompositeType(subType);
   DIArray Elements = blockStruct.getTypeArray();
 
   for (unsigned i = 0, N = Elements.getNumElements(); i < N; ++i) {
     DIDescriptor Element = Elements.getElement(i);
-    DIDerivedType DT = DIDerivedType(Element.getNode());
+    DIDerivedType DT = DIDerivedType(Element);
     if (Name == DT.getName())
       return (DT.getTypeDerivedFrom());
   }
@@ -553,8 +596,9 @@ void DwarfDebug::addComplexAddress(DbgVariable *&DV, DIE *Die,
 
   // Decode the original location, and use that as the start of the byref
   // variable's location.
+  const TargetRegisterInfo *RI = Asm->TM.getRegisterInfo();
   unsigned Reg = RI->getDwarfRegNum(Location.getReg(), false);
-  DIEBlock *Block = new DIEBlock();
+  DIEBlock *Block = new (DIEValueAllocator) DIEBlock();
 
   if (Location.isReg()) {
     if (Reg < 32) {
@@ -662,12 +706,12 @@ void DwarfDebug::addBlockByrefAddress(DbgVariable *&DV, DIE *Die,
   StringRef varName = VD.getName();
 
   if (Tag == dwarf::DW_TAG_pointer_type) {
-    DIDerivedType DTy = DIDerivedType(Ty.getNode());
+    DIDerivedType DTy = DIDerivedType(Ty);
     TmpTy = DTy.getTypeDerivedFrom();
     isPointer = true;
   }
 
-  DICompositeType blockStruct = DICompositeType(TmpTy.getNode());
+  DICompositeType blockStruct = DICompositeType(TmpTy);
 
   // Find the __forwarding field and the variable field in the __Block_byref
   // struct.
@@ -677,7 +721,7 @@ void DwarfDebug::addBlockByrefAddress(DbgVariable *&DV, DIE *Die,
 
   for (unsigned i = 0, N = Fields.getNumElements(); i < N; ++i) {
     DIDescriptor Element = Fields.getElement(i);
-    DIDerivedType DT = DIDerivedType(Element.getNode());
+    DIDerivedType DT = DIDerivedType(Element);
     StringRef fieldName = DT.getName();
     if (fieldName == "__forwarding")
       forwardingField = Element;
@@ -686,15 +730,16 @@ void DwarfDebug::addBlockByrefAddress(DbgVariable *&DV, DIE *Die,
   }
 
   // Get the offsets for the forwarding field and the variable field.
-  unsigned int forwardingFieldOffset =
-    DIDerivedType(forwardingField.getNode()).getOffsetInBits() >> 3;
-  unsigned int varFieldOffset =
-    DIDerivedType(varField.getNode()).getOffsetInBits() >> 3;
+  unsigned forwardingFieldOffset =
+    DIDerivedType(forwardingField).getOffsetInBits() >> 3;
+  unsigned varFieldOffset =
+    DIDerivedType(varField).getOffsetInBits() >> 3;
 
   // Decode the original location, and use that as the start of the byref
   // variable's location.
+  const TargetRegisterInfo *RI = Asm->TM.getRegisterInfo();
   unsigned Reg = RI->getDwarfRegNum(Location.getReg(), false);
-  DIEBlock *Block = new DIEBlock();
+  DIEBlock *Block = new (DIEValueAllocator) DIEBlock();
 
   if (Location.isReg()) {
     if (Reg < 32)
@@ -748,8 +793,9 @@ void DwarfDebug::addBlockByrefAddress(DbgVariable *&DV, DIE *Die,
 /// provided.
 void DwarfDebug::addAddress(DIE *Die, unsigned Attribute,
                             const MachineLocation &Location) {
+  const TargetRegisterInfo *RI = Asm->TM.getRegisterInfo();
   unsigned Reg = RI->getDwarfRegNum(Location.getReg(), false);
-  DIEBlock *Block = new DIEBlock();
+  DIEBlock *Block = new (DIEValueAllocator) DIEBlock();
 
   if (Location.isReg()) {
     if (Reg < 32) {
@@ -772,37 +818,96 @@ void DwarfDebug::addAddress(DIE *Die, unsigned Attribute,
   addBlock(Die, Attribute, 0, Block);
 }
 
+/// addRegisterAddress - Add register location entry in variable DIE.
+bool DwarfDebug::addRegisterAddress(DIE *Die, DbgVariable *DV,
+                                    const MachineOperand &MO) {
+  assert (MO.isReg() && "Invalid machine operand!");
+  if (!MO.getReg())
+    return false;
+  MachineLocation Location;
+  Location.set(MO.getReg());
+  addAddress(Die, dwarf::DW_AT_location, Location);
+  if (MCSymbol *VS = DV->getDbgValueLabel())
+    addLabel(Die, dwarf::DW_AT_start_scope, dwarf::DW_FORM_addr, VS);
+  return true;
+}
+
+/// addConstantValue - Add constant value entry in variable DIE.
+bool DwarfDebug::addConstantValue(DIE *Die, DbgVariable *DV, 
+                                  const MachineOperand &MO) {
+  assert (MO.isImm() && "Invalid machine operand!");
+  DIEBlock *Block = new (DIEValueAllocator) DIEBlock();
+  unsigned Imm = MO.getImm();
+  addUInt(Block, 0, dwarf::DW_FORM_udata, Imm);
+  addBlock(Die, dwarf::DW_AT_const_value, 0, Block);
+  if (MCSymbol *VS = DV->getDbgValueLabel())
+    addLabel(Die, dwarf::DW_AT_start_scope, dwarf::DW_FORM_addr, VS);
+  return true;
+}
+
+/// addConstantFPValue - Add constant value entry in variable DIE.
+bool DwarfDebug::addConstantFPValue(DIE *Die, DbgVariable *DV, 
+                                    const MachineOperand &MO) {
+  assert (MO.isFPImm() && "Invalid machine operand!");
+  DIEBlock *Block = new (DIEValueAllocator) DIEBlock();
+  APFloat FPImm = MO.getFPImm()->getValueAPF();
+  
+  // Get the raw data form of the floating point.
+  const APInt FltVal = FPImm.bitcastToAPInt();
+  const char *FltPtr = (const char*)FltVal.getRawData();
+  
+  int NumBytes = FltVal.getBitWidth() / 8; // 8 bits per byte.
+  bool LittleEndian = Asm->getTargetData().isLittleEndian();
+  int Incr = (LittleEndian ? 1 : -1);
+  int Start = (LittleEndian ? 0 : NumBytes - 1);
+  int Stop = (LittleEndian ? NumBytes : -1);
+  
+  // Output the constant to DWARF one byte at a time.
+  for (; Start != Stop; Start += Incr)
+    addUInt(Block, 0, dwarf::DW_FORM_data1,
+            (unsigned char)0xFF & FltPtr[Start]);
+  
+  addBlock(Die, dwarf::DW_AT_const_value, 0, Block);
+  
+  if (MCSymbol *VS = DV->getDbgValueLabel())
+    addLabel(Die, dwarf::DW_AT_start_scope, dwarf::DW_FORM_addr,
+             VS);
+  return true; 
+}
+
+
 /// addToContextOwner - Add Die into the list of its context owner's children.
 void DwarfDebug::addToContextOwner(DIE *Die, DIDescriptor Context) {
   if (Context.isType()) {
-    DIE *ContextDIE = getOrCreateTypeDIE(DIType(Context.getNode()));
+    DIE *ContextDIE = getOrCreateTypeDIE(DIType(Context));
     ContextDIE->addChild(Die);
   } else if (Context.isNameSpace()) {
-    DIE *ContextDIE = getOrCreateNameSpace(DINameSpace(Context.getNode()));
+    DIE *ContextDIE = getOrCreateNameSpace(DINameSpace(Context));
     ContextDIE->addChild(Die);
-  } else if (DIE *ContextDIE = ModuleCU->getDIE(Context.getNode()))
+  } else if (DIE *ContextDIE = getCompileUnit(Context)->getDIE(Context))
     ContextDIE->addChild(Die);
   else 
-    ModuleCU->addDie(Die);
+    getCompileUnit(Context)->addDie(Die);
 }
 
 /// getOrCreateTypeDIE - Find existing DIE or create new DIE for the
 /// given DIType.
 DIE *DwarfDebug::getOrCreateTypeDIE(DIType Ty) {
-  DIE *TyDIE = ModuleCU->getDIE(Ty.getNode());
+  CompileUnit *TypeCU = getCompileUnit(Ty);
+  DIE *TyDIE = TypeCU->getDIE(Ty);
   if (TyDIE)
     return TyDIE;
 
   // Create new type.
   TyDIE = new DIE(dwarf::DW_TAG_base_type);
-  ModuleCU->insertDIE(Ty.getNode(), TyDIE);
+  TypeCU->insertDIE(Ty, TyDIE);
   if (Ty.isBasicType())
-    constructTypeDIE(*TyDIE, DIBasicType(Ty.getNode()));
+    constructTypeDIE(*TyDIE, DIBasicType(Ty));
   else if (Ty.isCompositeType())
-    constructTypeDIE(*TyDIE, DICompositeType(Ty.getNode()));
+    constructTypeDIE(*TyDIE, DICompositeType(Ty));
   else {
     assert(Ty.isDerivedType() && "Unknown kind of DIType");
-    constructTypeDIE(*TyDIE, DIDerivedType(Ty.getNode()));
+    constructTypeDIE(*TyDIE, DIDerivedType(Ty));
   }
 
   addToContextOwner(TyDIE, Ty.getContext());
@@ -811,11 +916,12 @@ DIE *DwarfDebug::getOrCreateTypeDIE(DIType Ty) {
 
 /// addType - Add a new type attribute to the specified entity.
 void DwarfDebug::addType(DIE *Entity, DIType Ty) {
-  if (!Ty.isValid())
+  if (!Ty.Verify())
     return;
 
   // Check for pre-existence.
-  DIEEntry *Entry = ModuleCU->getDIEEntry(Ty.getNode());
+  CompileUnit *TypeCU = getCompileUnit(Ty);
+  DIEEntry *Entry = TypeCU->getDIEEntry(Ty);
   // If it exists then use the existing value.
   if (Entry) {
     Entity->addValue(dwarf::DW_AT_type, dwarf::DW_FORM_ref4, Entry);
@@ -827,7 +933,7 @@ void DwarfDebug::addType(DIE *Entity, DIType Ty) {
 
   // Set up proxy.
   Entry = createDIEEntry(Buffer);
-  ModuleCU->insertDIEEntry(Ty.getNode(), Entry);
+  TypeCU->insertDIEEntry(Ty, Entry);
 
   Entity->addValue(dwarf::DW_AT_type, dwarf::DW_FORM_ref4, Entry);
 }
@@ -896,9 +1002,9 @@ void DwarfDebug::constructTypeDIE(DIE &Buffer, DICompositeType CTy) {
     // Add enumerators to enumeration type.
     for (unsigned i = 0, N = Elements.getNumElements(); i < N; ++i) {
       DIE *ElemDie = NULL;
-      DIDescriptor Enum(Elements.getElement(i).getNode());
+      DIDescriptor Enum(Elements.getElement(i));
       if (Enum.isEnumerator()) {
-        ElemDie = constructEnumTypeDIE(DIEnumerator(Enum.getNode()));
+        ElemDie = constructEnumTypeDIE(DIEnumerator(Enum));
         Buffer.addChild(ElemDie);
       }
     }
@@ -908,7 +1014,7 @@ void DwarfDebug::constructTypeDIE(DIE &Buffer, DICompositeType CTy) {
     // Add return type.
     DIArray Elements = CTy.getTypeArray();
     DIDescriptor RTy = Elements.getElement(0);
-    addType(&Buffer, DIType(RTy.getNode()));
+    addType(&Buffer, DIType(RTy));
 
     // Add prototype flag.
     addUInt(&Buffer, dwarf::DW_AT_prototyped, dwarf::DW_FORM_flag, 1);
@@ -917,7 +1023,7 @@ void DwarfDebug::constructTypeDIE(DIE &Buffer, DICompositeType CTy) {
     for (unsigned i = 1, N = Elements.getNumElements(); i < N; ++i) {
       DIE *Arg = new DIE(dwarf::DW_TAG_formal_parameter);
       DIDescriptor Ty = Elements.getElement(i);
-      addType(Arg, DIType(Ty.getNode()));
+      addType(Arg, DIType(Ty));
       Buffer.addChild(Arg);
     }
   }
@@ -938,9 +1044,9 @@ void DwarfDebug::constructTypeDIE(DIE &Buffer, DICompositeType CTy) {
       DIDescriptor Element = Elements.getElement(i);
       DIE *ElemDie = NULL;
       if (Element.isSubprogram())
-        ElemDie = createSubprogramDIE(DISubprogram(Element.getNode()));
+        ElemDie = createSubprogramDIE(DISubprogram(Element));
       else if (Element.isVariable()) {
-        DIVariable DV(Element.getNode());
+        DIVariable DV(Element);
         ElemDie = new DIE(dwarf::DW_TAG_variable);
         addString(ElemDie, dwarf::DW_AT_name, dwarf::DW_FORM_string,
                   DV.getName());
@@ -949,7 +1055,7 @@ void DwarfDebug::constructTypeDIE(DIE &Buffer, DICompositeType CTy) {
         addUInt(ElemDie, dwarf::DW_AT_external, dwarf::DW_FORM_flag, 1);
         addSourceLine(ElemDie, &DV);
       } else if (Element.isDerivedType())
-        ElemDie = createMemberDIE(DIDerivedType(Element.getNode()));
+        ElemDie = createMemberDIE(DIDerivedType(Element));
       else
         continue;
       Buffer.addChild(ElemDie);
@@ -964,9 +1070,9 @@ void DwarfDebug::constructTypeDIE(DIE &Buffer, DICompositeType CTy) {
               dwarf::DW_FORM_data1, RLang);
 
     DICompositeType ContainingType = CTy.getContainingType();
-    if (DIDescriptor(ContainingType.getNode()).isCompositeType())
+    if (DIDescriptor(ContainingType).isCompositeType())
       addDIEEntry(&Buffer, dwarf::DW_AT_containing_type, dwarf::DW_FORM_ref4, 
-                  getOrCreateTypeDIE(DIType(ContainingType.getNode())));
+                  getOrCreateTypeDIE(DIType(ContainingType)));
     break;
   }
   default:
@@ -1022,22 +1128,23 @@ void DwarfDebug::constructArrayTypeDIE(DIE &Buffer,
   DIArray Elements = CTy->getTypeArray();
 
   // Get an anonymous type for index type.
-  DIE *IdxTy = ModuleCU->getIndexTyDie();
+  CompileUnit *TheCU = getCompileUnit(*CTy);
+  DIE *IdxTy = TheCU->getIndexTyDie();
   if (!IdxTy) {
     // Construct an anonymous type for index type.
     IdxTy = new DIE(dwarf::DW_TAG_base_type);
     addUInt(IdxTy, dwarf::DW_AT_byte_size, 0, sizeof(int32_t));
     addUInt(IdxTy, dwarf::DW_AT_encoding, dwarf::DW_FORM_data1,
             dwarf::DW_ATE_signed);
-    ModuleCU->addDie(IdxTy);
-    ModuleCU->setIndexTyDie(IdxTy);
+    TheCU->addDie(IdxTy);
+    TheCU->setIndexTyDie(IdxTy);
   }
 
   // Add subranges to array type.
   for (unsigned i = 0, N = Elements.getNumElements(); i < N; ++i) {
     DIDescriptor Element = Elements.getElement(i);
     if (Element.getTag() == dwarf::DW_TAG_subrange_type)
-      constructSubrangeDIE(Buffer, DISubrange(Element.getNode()), IdxTy);
+      constructSubrangeDIE(Buffer, DISubrange(Element), IdxTy);
   }
 }
 
@@ -1096,7 +1203,7 @@ DIE *DwarfDebug::createMemberDIE(const DIDerivedType &DT) {
 
   addSourceLine(MemberDie, &DT);
 
-  DIEBlock *MemLocationDie = new DIEBlock();
+  DIEBlock *MemLocationDie = new (DIEValueAllocator) DIEBlock();
   addUInt(MemLocationDie, 0, dwarf::DW_FORM_data1, dwarf::DW_OP_plus_uconst);
 
   uint64_t Size = DT.getSizeInBits();
@@ -1114,7 +1221,8 @@ DIE *DwarfDebug::createMemberDIE(const DIDerivedType &DT) {
     Offset -= FieldOffset;
 
     // Maybe we need to work from the other end.
-    if (TD->isLittleEndian()) Offset = FieldSize - (Offset + Size);
+    if (Asm->getTargetData().isLittleEndian())
+      Offset = FieldSize - (Offset + Size);
     addUInt(MemberDie, dwarf::DW_AT_bit_offset, 0, Offset);
 
     // Here WD_AT_data_member_location points to the anonymous
@@ -1132,7 +1240,7 @@ DIE *DwarfDebug::createMemberDIE(const DIDerivedType &DT) {
     // expression to extract appropriate offset from vtable.
     // BaseAddr = ObAddr + *((*ObAddr) - Offset)
 
-    DIEBlock *VBaseLocationDie = new DIEBlock();
+    DIEBlock *VBaseLocationDie = new (DIEValueAllocator) DIEBlock();
     addUInt(VBaseLocationDie, 0, dwarf::DW_FORM_data1, dwarf::DW_OP_dup);
     addUInt(VBaseLocationDie, 0, dwarf::DW_FORM_data1, dwarf::DW_OP_deref);
     addUInt(VBaseLocationDie, 0, dwarf::DW_FORM_data1, dwarf::DW_OP_constu);
@@ -1163,7 +1271,8 @@ DIE *DwarfDebug::createMemberDIE(const DIDerivedType &DT) {
 
 /// createSubprogramDIE - Create new DIE using SP.
 DIE *DwarfDebug::createSubprogramDIE(const DISubprogram &SP, bool MakeDecl) {
-  DIE *SPDie = ModuleCU->getDIE(SP.getNode());
+  CompileUnit *SPCU = getCompileUnit(SP);
+  DIE *SPDie = SPCU->getDIE(SP);
   if (SPDie)
     return SPDie;
 
@@ -1193,17 +1302,17 @@ DIE *DwarfDebug::createSubprogramDIE(const DISubprogram &SP, bool MakeDecl) {
   if (Args.getNumElements() == 0 || SPTag != dwarf::DW_TAG_subroutine_type)
     addType(SPDie, SPTy);
   else
-    addType(SPDie, DIType(Args.getElement(0).getNode()));
+    addType(SPDie, DIType(Args.getElement(0)));
 
   unsigned VK = SP.getVirtuality();
   if (VK) {
     addUInt(SPDie, dwarf::DW_AT_virtuality, dwarf::DW_FORM_flag, VK);
-    DIEBlock *Block = new DIEBlock();
+    DIEBlock *Block = new (DIEValueAllocator) DIEBlock();
     addUInt(Block, 0, dwarf::DW_FORM_data1, dwarf::DW_OP_constu);
     addUInt(Block, 0, dwarf::DW_FORM_data1, SP.getVirtualIndex());
     addBlock(SPDie, dwarf::DW_AT_vtable_elem_location, 0, Block);
     ContainingTypeMap.insert(std::make_pair(SPDie, 
-                                            SP.getContainingType().getNode()));
+                                            SP.getContainingType()));
   }
 
   if (MakeDecl || !SP.isDefinition()) {
@@ -1218,7 +1327,7 @@ DIE *DwarfDebug::createSubprogramDIE(const DISubprogram &SP, bool MakeDecl) {
     if (SPTag == dwarf::DW_TAG_subroutine_type)
       for (unsigned i = 1, N =  Args.getNumElements(); i < N; ++i) {
         DIE *Arg = new DIE(dwarf::DW_TAG_formal_parameter);
-        DIType ATy = DIType(DIType(Args.getElement(i).getNode()));
+        DIType ATy = DIType(DIType(Args.getElement(i)));
         addType(Arg, ATy);
         if (ATy.isArtificial())
           addUInt(Arg, dwarf::DW_AT_artificial, dwarf::DW_FORM_flag, 1);
@@ -1229,63 +1338,20 @@ DIE *DwarfDebug::createSubprogramDIE(const DISubprogram &SP, bool MakeDecl) {
   if (SP.isArtificial())
     addUInt(SPDie, dwarf::DW_AT_artificial, dwarf::DW_FORM_flag, 1);
 
+  if (!SP.isLocalToUnit())
+    addUInt(SPDie, dwarf::DW_AT_external, dwarf::DW_FORM_flag, 1);
+  
+  if (SP.isOptimized())
+    addUInt(SPDie, dwarf::DW_AT_APPLE_optimized, dwarf::DW_FORM_flag, 1);
+
   // DW_TAG_inlined_subroutine may refer to this DIE.
-  ModuleCU->insertDIE(SP.getNode(), SPDie);
+  SPCU->insertDIE(SP, SPDie);
+
   return SPDie;
 }
 
-/// getUpdatedDbgScope - Find or create DbgScope assicated with the instruction.
-/// Initialize scope and update scope hierarchy.
-DbgScope *DwarfDebug::getUpdatedDbgScope(MDNode *N, const MachineInstr *MI,
-  MDNode *InlinedAt) {
-  assert (N && "Invalid Scope encoding!");
-  assert (MI && "Missing machine instruction!");
-  bool GetConcreteScope = (MI && InlinedAt);
-
-  DbgScope *NScope = NULL;
-
-  if (InlinedAt)
-    NScope = DbgScopeMap.lookup(InlinedAt);
-  else
-    NScope = DbgScopeMap.lookup(N);
-  assert (NScope && "Unable to find working scope!");
-
-  if (NScope->getFirstInsn())
-    return NScope;
-
-  DbgScope *Parent = NULL;
-  if (GetConcreteScope) {
-    DILocation IL(InlinedAt);
-    Parent = getUpdatedDbgScope(IL.getScope().getNode(), MI,
-                         IL.getOrigLocation().getNode());
-    assert (Parent && "Unable to find Parent scope!");
-    NScope->setParent(Parent);
-    Parent->addScope(NScope);
-  } else if (DIDescriptor(N).isLexicalBlock()) {
-    DILexicalBlock DB(N);
-    Parent = getUpdatedDbgScope(DB.getContext().getNode(), MI, InlinedAt);
-    NScope->setParent(Parent);
-    Parent->addScope(NScope);
-  }
-
-  NScope->setFirstInsn(MI);
-
-  if (!Parent && !InlinedAt) {
-    StringRef SPName = DISubprogram(N).getLinkageName();
-    if (SPName == MF->getFunction()->getName())
-      CurrentFnDbgScope = NScope;
-  }
-
-  if (GetConcreteScope) {
-    ConcreteScopes[InlinedAt] = NScope;
-    getOrCreateAbstractScope(N);
-  }
-
-  return NScope;
-}
-
-DbgScope *DwarfDebug::getOrCreateAbstractScope(MDNode *N) {
-  assert (N && "Invalid Scope encoding!");
+DbgScope *DwarfDebug::getOrCreateAbstractScope(const MDNode *N) {
+  assert(N && "Invalid Scope encoding!");
 
   DbgScope *AScope = AbstractScopes.lookup(N);
   if (AScope)
@@ -1297,7 +1363,7 @@ DbgScope *DwarfDebug::getOrCreateAbstractScope(MDNode *N) {
   if (Scope.isLexicalBlock()) {
     DILexicalBlock DB(N);
     DIDescriptor ParentDesc = DB.getContext();
-    Parent = getOrCreateAbstractScope(ParentDesc.getNode());
+    Parent = getOrCreateAbstractScope(ParentDesc);
   }
 
   AScope = new DbgScope(Parent, DIDescriptor(N), NULL);
@@ -1311,75 +1377,109 @@ DbgScope *DwarfDebug::getOrCreateAbstractScope(MDNode *N) {
   return AScope;
 }
 
+/// isSubprogramContext - Return true if Context is either a subprogram
+/// or another context nested inside a subprogram.
+static bool isSubprogramContext(const MDNode *Context) {
+  if (!Context)
+    return false;
+  DIDescriptor D(Context);
+  if (D.isSubprogram())
+    return true;
+  if (D.isType())
+    return isSubprogramContext(DIType(Context).getContext());
+  return false;
+}
+
 /// updateSubprogramScopeDIE - Find DIE for the given subprogram and
 /// attach appropriate DW_AT_low_pc and DW_AT_high_pc attributes.
 /// If there are global variables in this scope then create and insert
 /// DIEs for these variables.
-DIE *DwarfDebug::updateSubprogramScopeDIE(MDNode *SPNode) {
- DIE *SPDie = ModuleCU->getDIE(SPNode);
- assert(SPDie && "Unable to find subprogram DIE!");
- DISubprogram SP(SPNode);
+DIE *DwarfDebug::updateSubprogramScopeDIE(const MDNode *SPNode) {
+  CompileUnit *SPCU = getCompileUnit(SPNode);
+  DIE *SPDie = SPCU->getDIE(SPNode);
+  assert(SPDie && "Unable to find subprogram DIE!");
+  DISubprogram SP(SPNode);
   
- // There is not any need to generate specification DIE for a function
- // defined at compile unit level. If a function is defined inside another
- // function then gdb prefers the definition at top level and but does not
- // expect specification DIE in parent function. So avoid creating 
- // specification DIE for a function defined inside a function.
- if (SP.isDefinition() && !SP.getContext().isCompileUnit() &&
-     !SP.getContext().isFile() && !SP.getContext().isSubprogram()) {
-   addUInt(SPDie, dwarf::DW_AT_declaration, dwarf::DW_FORM_flag, 1);
-   
-   // Add arguments. 
-   DICompositeType SPTy = SP.getType();
-   DIArray Args = SPTy.getTypeArray();
-   unsigned SPTag = SPTy.getTag();
-   if (SPTag == dwarf::DW_TAG_subroutine_type)
-     for (unsigned i = 1, N = Args.getNumElements(); i < N; ++i) {
-       DIE *Arg = new DIE(dwarf::DW_TAG_formal_parameter);
-       DIType ATy = DIType(DIType(Args.getElement(i).getNode()));
-       addType(Arg, ATy);
-       if (ATy.isArtificial())
-         addUInt(Arg, dwarf::DW_AT_artificial, dwarf::DW_FORM_flag, 1);
-       SPDie->addChild(Arg);
-     }
-   DIE *SPDeclDie = SPDie;
-   SPDie = new DIE(dwarf::DW_TAG_subprogram);
-   addDIEEntry(SPDie, dwarf::DW_AT_specification, dwarf::DW_FORM_ref4, 
-               SPDeclDie);
-   ModuleCU->addDie(SPDie);
- }
+  // There is not any need to generate specification DIE for a function
+  // defined at compile unit level. If a function is defined inside another
+  // function then gdb prefers the definition at top level and but does not
+  // expect specification DIE in parent function. So avoid creating 
+  // specification DIE for a function defined inside a function.
+  if (SP.isDefinition() && !SP.getContext().isCompileUnit() &&
+      !SP.getContext().isFile() && 
+      !isSubprogramContext(SP.getContext())) {
+    addUInt(SPDie, dwarf::DW_AT_declaration, dwarf::DW_FORM_flag, 1);
+    
+    // Add arguments. 
+    DICompositeType SPTy = SP.getType();
+    DIArray Args = SPTy.getTypeArray();
+    unsigned SPTag = SPTy.getTag();
+    if (SPTag == dwarf::DW_TAG_subroutine_type)
+      for (unsigned i = 1, N = Args.getNumElements(); i < N; ++i) {
+        DIE *Arg = new DIE(dwarf::DW_TAG_formal_parameter);
+        DIType ATy = DIType(DIType(Args.getElement(i)));
+        addType(Arg, ATy);
+        if (ATy.isArtificial())
+          addUInt(Arg, dwarf::DW_AT_artificial, dwarf::DW_FORM_flag, 1);
+        SPDie->addChild(Arg);
+      }
+    DIE *SPDeclDie = SPDie;
+    SPDie = new DIE(dwarf::DW_TAG_subprogram);
+    addDIEEntry(SPDie, dwarf::DW_AT_specification, dwarf::DW_FORM_ref4, 
+                SPDeclDie);
+    SPCU->addDie(SPDie);
+  }
+  
+  addLabel(SPDie, dwarf::DW_AT_low_pc, dwarf::DW_FORM_addr,
+           Asm->GetTempSymbol("func_begin", Asm->getFunctionNumber()));
+  addLabel(SPDie, dwarf::DW_AT_high_pc, dwarf::DW_FORM_addr,
+           Asm->GetTempSymbol("func_end", Asm->getFunctionNumber()));
+  const TargetRegisterInfo *RI = Asm->TM.getRegisterInfo();
+  MachineLocation Location(RI->getFrameRegister(*Asm->MF));
+  addAddress(SPDie, dwarf::DW_AT_frame_base, Location);
 
- addLabel(SPDie, dwarf::DW_AT_low_pc, dwarf::DW_FORM_addr,
-          getDWLabel("func_begin", SubprogramCount));
- addLabel(SPDie, dwarf::DW_AT_high_pc, dwarf::DW_FORM_addr,
-          getDWLabel("func_end", SubprogramCount));
- MachineLocation Location(RI->getFrameRegister(*MF));
- addAddress(SPDie, dwarf::DW_AT_frame_base, Location);
-
- if (!DISubprogram(SPNode).isLocalToUnit())
-   addUInt(SPDie, dwarf::DW_AT_external, dwarf::DW_FORM_flag, 1);
-
- return SPDie;
+  return SPDie;
 }
 
 /// constructLexicalScope - Construct new DW_TAG_lexical_block
 /// for this scope and attach DW_AT_low_pc/DW_AT_high_pc labels.
 DIE *DwarfDebug::constructLexicalScopeDIE(DbgScope *Scope) {
-  MCSymbol *Start = Scope->getStartLabel();
-  MCSymbol *End = Scope->getEndLabel();
-  if (Start == 0) return 0;
 
-  assert(Start->isDefined() && "Invalid starting label for an inlined scope!");
-  assert(End->isDefined() && "Invalid end label for an inlined scope!");
-  
   DIE *ScopeDIE = new DIE(dwarf::DW_TAG_lexical_block);
   if (Scope->isAbstractScope())
     return ScopeDIE;
 
-  addLabel(ScopeDIE, dwarf::DW_AT_low_pc, dwarf::DW_FORM_addr,
-           Start ? Start : getDWLabel("func_begin", SubprogramCount));
-  addLabel(ScopeDIE, dwarf::DW_AT_high_pc, dwarf::DW_FORM_addr,
-           End ? End : getDWLabel("func_end", SubprogramCount));
+  const SmallVector<DbgRange, 4> &Ranges = Scope->getRanges();
+  if (Ranges.empty())
+    return 0;
+
+  SmallVector<DbgRange, 4>::const_iterator RI = Ranges.begin();
+  if (Ranges.size() > 1) {
+    // .debug_range section has not been laid out yet. Emit offset in
+    // .debug_range as a uint, size 4, for now. emitDIE will handle 
+    // DW_AT_ranges appropriately.
+    addUInt(ScopeDIE, dwarf::DW_AT_ranges, dwarf::DW_FORM_data4,
+            DebugRangeSymbols.size() * Asm->getTargetData().getPointerSize());
+    for (SmallVector<DbgRange, 4>::const_iterator RI = Ranges.begin(),
+         RE = Ranges.end(); RI != RE; ++RI) {
+      DebugRangeSymbols.push_back(LabelsBeforeInsn.lookup(RI->first));
+      DebugRangeSymbols.push_back(LabelsAfterInsn.lookup(RI->second));
+    }
+    DebugRangeSymbols.push_back(NULL);
+    DebugRangeSymbols.push_back(NULL);
+    return ScopeDIE;
+  }
+
+  MCSymbol *Start = LabelsBeforeInsn.lookup(RI->first);
+  MCSymbol *End = LabelsAfterInsn.lookup(RI->second);
+
+  if (Start == 0 || End == 0) return 0;
+
+  assert(Start->isDefined() && "Invalid starting label for an inlined scope!");
+  assert(End->isDefined() && "Invalid end label for an inlined scope!");
+  
+  addLabel(ScopeDIE, dwarf::DW_AT_low_pc, dwarf::DW_FORM_addr, Start);
+  addLabel(ScopeDIE, dwarf::DW_AT_high_pc, dwarf::DW_FORM_addr, End);
 
   return ScopeDIE;
 }
@@ -1388,22 +1488,37 @@ DIE *DwarfDebug::constructLexicalScopeDIE(DbgScope *Scope) {
 /// a function. Construct DIE to represent this concrete inlined copy
 /// of the function.
 DIE *DwarfDebug::constructInlinedScopeDIE(DbgScope *Scope) {
-  MCSymbol *StartLabel = Scope->getStartLabel();
-  MCSymbol *EndLabel = Scope->getEndLabel();
-  if (StartLabel == 0) return 0;
-  
+
+  const SmallVector<DbgRange, 4> &Ranges = Scope->getRanges();
+  assert (Ranges.empty() == false 
+          && "DbgScope does not have instruction markers!");
+
+  // FIXME : .debug_inlined section specification does not clearly state how
+  // to emit inlined scope that is split into multiple instruction ranges.
+  // For now, use first instruction range and emit low_pc/high_pc pair and
+  // corresponding .debug_inlined section entry for this pair.
+  SmallVector<DbgRange, 4>::const_iterator RI = Ranges.begin();
+  MCSymbol *StartLabel = LabelsBeforeInsn.lookup(RI->first);
+  MCSymbol *EndLabel = LabelsAfterInsn.lookup(RI->second);
+
+  if (StartLabel == 0 || EndLabel == 0) {
+    assert (0 && "Unexpected Start and End  labels for a inlined scope!");
+    return 0;
+  }
   assert(StartLabel->isDefined() &&
          "Invalid starting label for an inlined scope!");
   assert(EndLabel->isDefined() &&
          "Invalid end label for an inlined scope!");
+
   if (!Scope->getScopeNode())
     return NULL;
   DIScope DS(Scope->getScopeNode());
   DIE *ScopeDIE = new DIE(dwarf::DW_TAG_inlined_subroutine);
 
-  DISubprogram InlinedSP = getDISubprogram(DS.getNode());
-  DIE *OriginDIE = ModuleCU->getDIE(InlinedSP.getNode());
-  assert (OriginDIE && "Unable to find Origin DIE!");
+  DISubprogram InlinedSP = getDISubprogram(DS);
+  CompileUnit *TheCU = getCompileUnit(InlinedSP);
+  DIE *OriginDIE = TheCU->getDIE(InlinedSP);
+  assert(OriginDIE && "Unable to find Origin DIE!");
   addDIEEntry(ScopeDIE, dwarf::DW_AT_abstract_origin,
               dwarf::DW_FORM_ref4, OriginDIE);
 
@@ -1413,18 +1528,18 @@ DIE *DwarfDebug::constructInlinedScopeDIE(DbgScope *Scope) {
   InlinedSubprogramDIEs.insert(OriginDIE);
 
   // Track the start label for this inlined function.
-  DenseMap<MDNode *, SmallVector<InlineInfoLabels, 4> >::iterator
-    I = InlineInfo.find(InlinedSP.getNode());
+  DenseMap<const MDNode *, SmallVector<InlineInfoLabels, 4> >::iterator
+    I = InlineInfo.find(InlinedSP);
 
   if (I == InlineInfo.end()) {
-    InlineInfo[InlinedSP.getNode()].push_back(std::make_pair(StartLabel,
+    InlineInfo[InlinedSP].push_back(std::make_pair(StartLabel,
                                                              ScopeDIE));
-    InlinedSPNodes.push_back(InlinedSP.getNode());
+    InlinedSPNodes.push_back(InlinedSP);
   } else
     I->second.push_back(std::make_pair(StartLabel, ScopeDIE));
 
   DILocation DL(Scope->getInlinedAt());
-  addUInt(ScopeDIE, dwarf::DW_AT_call_file, 0, ModuleCU->getID());
+  addUInt(ScopeDIE, dwarf::DW_AT_call_file, 0, TheCU->getID());
   addUInt(ScopeDIE, dwarf::DW_AT_call_line, 0, DL.getLineNumber());
 
   return ScopeDIE;
@@ -1464,12 +1579,12 @@ DIE *DwarfDebug::constructVariableDIE(DbgVariable *DV, DbgScope *Scope) {
 
   if (AbsDIE) {
     DIScope DS(Scope->getScopeNode());
-    DISubprogram InlinedSP = getDISubprogram(DS.getNode());
-    DIE *OriginSPDIE = ModuleCU->getDIE(InlinedSP.getNode());
+    DISubprogram InlinedSP = getDISubprogram(DS);
+    DIE *OriginSPDIE = getCompileUnit(InlinedSP)->getDIE(InlinedSP);
     (void) OriginSPDIE;
-    assert (OriginSPDIE && "Unable to find Origin DIE for the SP!");
+    assert(OriginSPDIE && "Unable to find Origin DIE for the SP!");
     DIE *AbsDIE = DV->getAbstractVariable()->getDIE();
-    assert (AbsDIE && "Unable to find Origin DIE for the Variable!");
+    assert(AbsDIE && "Unable to find Origin DIE for the Variable!");
     addDIEEntry(VariableDie, dwarf::DW_AT_abstract_origin,
                 dwarf::DW_FORM_ref4, AbsDIE);
   }
@@ -1489,39 +1604,49 @@ DIE *DwarfDebug::constructVariableDIE(DbgVariable *DV, DbgScope *Scope) {
   // Add variable address.
   if (!Scope->isAbstractScope()) {
     // Check if variable is described by DBG_VALUE instruction.
-    if (const MachineInstr *DbgValueInsn = DV->getDbgValue()) {
-      if (DbgValueInsn->getNumOperands() == 3) {
-        // FIXME : Handle getNumOperands != 3 
-        if (DbgValueInsn->getOperand(0).getType() 
-            == MachineOperand::MO_Register
-            && DbgValueInsn->getOperand(0).getReg()) {
-          MachineLocation Location;
-          Location.set(DbgValueInsn->getOperand(0).getReg());
+    if (const MachineInstr *DVInsn = DV->getDbgValue()) {
+      bool updated = false;
+      // FIXME : Handle getNumOperands != 3 
+      if (DVInsn->getNumOperands() == 3) {
+        if (DVInsn->getOperand(0).isReg())
+          updated = addRegisterAddress(VariableDie, DV, DVInsn->getOperand(0));
+        else if (DVInsn->getOperand(0).isImm())
+          updated = addConstantValue(VariableDie, DV, DVInsn->getOperand(0));
+        else if (DVInsn->getOperand(0).isFPImm()) 
+          updated = addConstantFPValue(VariableDie, DV, DVInsn->getOperand(0));
+      } else {
+        MachineLocation Location = Asm->getDebugValueLocation(DVInsn);
+        if (Location.getReg()) {
           addAddress(VariableDie, dwarf::DW_AT_location, Location);
-        } else if (DbgValueInsn->getOperand(0).getType() == 
-                   MachineOperand::MO_Immediate) {
-          DIEBlock *Block = new DIEBlock();
-          unsigned Imm = DbgValueInsn->getOperand(0).getImm();
-          addUInt(Block, 0, dwarf::DW_FORM_udata, Imm);
-          addBlock(VariableDie, dwarf::DW_AT_const_value, 0, Block);
-        } else {
-          //FIXME : Handle other operand types.
-          delete VariableDie;
-          return NULL;
+          if (MCSymbol *VS = DV->getDbgValueLabel())
+            addLabel(VariableDie, dwarf::DW_AT_start_scope, dwarf::DW_FORM_addr,
+                     VS);
+          updated = true;
         }
-      } 
-    } else {
+      }
+      if (!updated) {
+        // If variableDie is not updated then DBG_VALUE instruction does not
+        // have valid variable info.
+        delete VariableDie;
+        return NULL;
+      }
+    } 
+    else {
       MachineLocation Location;
       unsigned FrameReg;
-      int Offset = RI->getFrameIndexReference(*MF, DV->getFrameIndex(), FrameReg);
-      Location.set(FrameReg, Offset);
-      
-      if (VD.hasComplexAddress())
-        addComplexAddress(DV, VariableDie, dwarf::DW_AT_location, Location);
-      else if (VD.isBlockByrefVariable())
-        addBlockByrefAddress(DV, VariableDie, dwarf::DW_AT_location, Location);
-      else
-        addAddress(VariableDie, dwarf::DW_AT_location, Location);
+      const TargetRegisterInfo *RI = Asm->TM.getRegisterInfo();
+      if (DV->hasLocation()) {
+        int Offset = RI->getFrameIndexReference(*Asm->MF, DV->getFrameIndex(),
+                                                FrameReg);
+        Location.set(FrameReg, Offset);
+        
+        if (VD.hasComplexAddress())
+          addComplexAddress(DV, VariableDie, dwarf::DW_AT_location, Location);
+        else if (VD.isBlockByrefVariable())
+          addBlockByrefAddress(DV, VariableDie, dwarf::DW_AT_location, Location);
+        else
+          addAddress(VariableDie, dwarf::DW_AT_location, Location);
+      }
     }
   }
 
@@ -1540,13 +1665,15 @@ void DwarfDebug::addPubTypes(DISubprogram SP) {
 
   DIArray Args = SPTy.getTypeArray();
   for (unsigned i = 0, e = Args.getNumElements(); i != e; ++i) {
-    DIType ATy(Args.getElement(i).getNode());
-    if (!ATy.isValid())
+    DIType ATy(Args.getElement(i));
+    if (!ATy.Verify())
       continue;
     DICompositeType CATy = getDICompositeType(ATy);
-    if (DIDescriptor(CATy.getNode()).Verify() && !CATy.getName().empty()) {
-      if (DIEEntry *Entry = ModuleCU->getDIEEntry(CATy.getNode()))
-        ModuleCU->addGlobalType(CATy.getName(), Entry->getEntry());
+    if (DIDescriptor(CATy).Verify() && !CATy.getName().empty()
+        && !CATy.isForwardDecl()) {
+      CompileUnit *TheCU = getCompileUnit(CATy);
+      if (DIEEntry *Entry = TheCU->getDIEEntry(CATy))
+        TheCU->addGlobalType(CATy.getName(), Entry->getEntry());
     }
   }
 }
@@ -1562,14 +1689,13 @@ DIE *DwarfDebug::constructScopeDIE(DbgScope *Scope) {
     ScopeDIE = constructInlinedScopeDIE(Scope);
   else if (DS.isSubprogram()) {
     if (Scope->isAbstractScope())
-      ScopeDIE = ModuleCU->getDIE(DS.getNode());
+      ScopeDIE = getCompileUnit(DS)->getDIE(DS);
     else
-      ScopeDIE = updateSubprogramScopeDIE(DS.getNode());
+      ScopeDIE = updateSubprogramScopeDIE(DS);
   }
-  else {
+  else
     ScopeDIE = constructLexicalScopeDIE(Scope);
-    if (!ScopeDIE) return NULL;
-  }
+  if (!ScopeDIE) return NULL;
   
   // Add variables to scope.
   const SmallVector<DbgVariable *, 8> &Variables = Scope->getVariables();
@@ -1589,7 +1715,7 @@ DIE *DwarfDebug::constructScopeDIE(DbgScope *Scope) {
   }
 
   if (DS.isSubprogram()) 
-    addPubTypes(DISubprogram(DS.getNode()));
+    addPubTypes(DISubprogram(DS));
  
  return ScopeDIE;
 }
@@ -1598,7 +1724,7 @@ DIE *DwarfDebug::constructScopeDIE(DbgScope *Scope) {
 /// source file names. If none currently exists, create a new id and insert it
 /// in the SourceIds map. This can update DirectoryNames and SourceFileNames
 /// maps as well.
-unsigned DwarfDebug::GetOrCreateSourceID(StringRef DirName, StringRef FileName) {
+unsigned DwarfDebug::GetOrCreateSourceID(StringRef DirName, StringRef FileName){
   unsigned DId;
   StringMap<unsigned>::iterator DI = DirectoryIdMap.find(DirName);
   if (DI != DirectoryIdMap.end()) {
@@ -1633,11 +1759,12 @@ unsigned DwarfDebug::GetOrCreateSourceID(StringRef DirName, StringRef FileName) 
 
 /// getOrCreateNameSpace - Create a DIE for DINameSpace.
 DIE *DwarfDebug::getOrCreateNameSpace(DINameSpace NS) {
-  DIE *NDie = ModuleCU->getDIE(NS.getNode());
+  CompileUnit *TheCU = getCompileUnit(NS);
+  DIE *NDie = TheCU->getDIE(NS);
   if (NDie)
     return NDie;
   NDie = new DIE(dwarf::DW_TAG_namespace);
-  ModuleCU->insertDIE(NS.getNode(), NDie);
+  TheCU->insertDIE(NS, NDie);
   if (!NS.getName().empty())
     addString(NDie, dwarf::DW_AT_name, dwarf::DW_FORM_string, NS.getName());
   addSourceLine(NDie, &NS);
@@ -1645,12 +1772,10 @@ DIE *DwarfDebug::getOrCreateNameSpace(DINameSpace NS) {
   return NDie;
 }
 
-void DwarfDebug::constructCompileUnit(MDNode *N) {
+/// constructCompileUnit - Create new CompileUnit for the given 
+/// metadata node with tag DW_TAG_compile_unit.
+void DwarfDebug::constructCompileUnit(const MDNode *N) {
   DICompileUnit DIUnit(N);
-  // Use first compile unit marked as isMain as the compile unit for this
-  // module.
-  if (ModuleCU || !DIUnit.isMain())
-    return;
   StringRef FN = DIUnit.getFilename();
   StringRef Dir = DIUnit.getDirectory();
   unsigned ID = GetOrCreateSourceID(Dir, FN);
@@ -1661,10 +1786,9 @@ void DwarfDebug::constructCompileUnit(MDNode *N) {
   addUInt(Die, dwarf::DW_AT_language, dwarf::DW_FORM_data1,
           DIUnit.getLanguage());
   addString(Die, dwarf::DW_AT_name, dwarf::DW_FORM_string, FN);
-  addLabel(Die, dwarf::DW_AT_low_pc, dwarf::DW_FORM_addr,
-           getTempLabel("text_begin"));
-  addLabel(Die, dwarf::DW_AT_high_pc, dwarf::DW_FORM_addr,
-           getTempLabel("text_end"));
+  // Use DW_AT_entry_pc instead of DW_AT_low_pc/DW_AT_high_pc pair. This
+  // simplifies debug range entries.
+  addUInt(Die, dwarf::DW_AT_entry_pc, dwarf::DW_FORM_data4, 0);
   // DW_AT_stmt_list is a offset of line number information for this
   // compile unit in debug_line section. It is always zero when only one
   // compile unit is emitted in one object file.
@@ -1684,12 +1808,44 @@ void DwarfDebug::constructCompileUnit(MDNode *N) {
     addUInt(Die, dwarf::DW_AT_APPLE_major_runtime_vers,
             dwarf::DW_FORM_data1, RVer);
 
-  assert(!ModuleCU &&
-         "ModuleCU assigned since the top of constructCompileUnit");
-  ModuleCU = new CompileUnit(ID, Die);
+  CompileUnit *NewCU = new CompileUnit(ID, Die);
+  if (!FirstCU)
+    FirstCU = NewCU;
+  CUMap.insert(std::make_pair(N, NewCU));
 }
 
-void DwarfDebug::constructGlobalVariableDIE(MDNode *N) {
+/// getCompielUnit - Get CompileUnit DIE.
+CompileUnit *DwarfDebug::getCompileUnit(const MDNode *N) const {
+  assert (N && "Invalid DwarfDebug::getCompileUnit argument!");
+  DIDescriptor D(N);
+  const MDNode *CUNode = NULL;
+  if (D.isCompileUnit())
+    CUNode = N;
+  else if (D.isSubprogram())
+    CUNode = DISubprogram(N).getCompileUnit();
+  else if (D.isType())
+    CUNode = DIType(N).getCompileUnit();
+  else if (D.isGlobalVariable())
+    CUNode = DIGlobalVariable(N).getCompileUnit();
+  else if (D.isVariable())
+    CUNode = DIVariable(N).getCompileUnit();
+  else if (D.isNameSpace())
+    CUNode = DINameSpace(N).getCompileUnit();
+  else if (D.isFile())
+    CUNode = DIFile(N).getCompileUnit();
+  else
+    return FirstCU;
+
+  DenseMap<const MDNode *, CompileUnit *>::const_iterator I
+    = CUMap.find(CUNode);
+  if (I == CUMap.end())
+    return FirstCU;
+  return I->second;
+}
+
+
+/// constructGlobalVariableDIE - Construct global variable DIE.
+void DwarfDebug::constructGlobalVariableDIE(const MDNode *N) {
   DIGlobalVariable DI_GV(N);
 
   // If debug information is malformed then ignore it.
@@ -1697,7 +1853,8 @@ void DwarfDebug::constructGlobalVariableDIE(MDNode *N) {
     return;
 
   // Check for pre-existence.
-  if (ModuleCU->getDIE(DI_GV.getNode()))
+  CompileUnit *TheCU = getCompileUnit(N);
+  if (TheCU->getDIE(DI_GV))
     return;
 
   DIE *VariableDie = createGlobalVariableDIE(DI_GV);
@@ -1705,27 +1862,28 @@ void DwarfDebug::constructGlobalVariableDIE(MDNode *N) {
     return;
 
   // Add to map.
-  ModuleCU->insertDIE(N, VariableDie);
+  TheCU->insertDIE(N, VariableDie);
 
   // Add to context owner.
   DIDescriptor GVContext = DI_GV.getContext();
   // Do not create specification DIE if context is either compile unit
   // or a subprogram.
-  if (DI_GV.isDefinition() && !GVContext.isCompileUnit()
-      && !GVContext.isFile() && !GVContext.isSubprogram()) {
+  if (DI_GV.isDefinition() && !GVContext.isCompileUnit() &&
+      !GVContext.isFile() && 
+      !isSubprogramContext(GVContext)) {
     // Create specification DIE.
     DIE *VariableSpecDIE = new DIE(dwarf::DW_TAG_variable);
     addDIEEntry(VariableSpecDIE, dwarf::DW_AT_specification,
                 dwarf::DW_FORM_ref4, VariableDie);
-    DIEBlock *Block = new DIEBlock();
+    DIEBlock *Block = new (DIEValueAllocator) DIEBlock();
     addUInt(Block, 0, dwarf::DW_FORM_data1, dwarf::DW_OP_addr);
     addLabel(Block, 0, dwarf::DW_FORM_udata,
              Asm->Mang->getSymbol(DI_GV.getGlobal()));
     addBlock(VariableSpecDIE, dwarf::DW_AT_location, 0, Block);
     addUInt(VariableDie, dwarf::DW_AT_declaration, dwarf::DW_FORM_flag, 1);
-    ModuleCU->addDie(VariableSpecDIE);
+    TheCU->addDie(VariableSpecDIE);
   } else {
-    DIEBlock *Block = new DIEBlock();
+    DIEBlock *Block = new (DIEValueAllocator) DIEBlock();
     addUInt(Block, 0, dwarf::DW_FORM_data1, dwarf::DW_OP_addr);
     addLabel(Block, 0, dwarf::DW_FORM_udata,
              Asm->Mang->getSymbol(DI_GV.getGlobal()));
@@ -1734,22 +1892,25 @@ void DwarfDebug::constructGlobalVariableDIE(MDNode *N) {
   addToContextOwner(VariableDie, GVContext);
   
   // Expose as global. FIXME - need to check external flag.
-  ModuleCU->addGlobal(DI_GV.getName(), VariableDie);
+  TheCU->addGlobal(DI_GV.getName(), VariableDie);
 
   DIType GTy = DI_GV.getType();
-  if (GTy.isCompositeType() && !GTy.getName().empty()) {
-    DIEEntry *Entry = ModuleCU->getDIEEntry(GTy.getNode());
-    assert (Entry && "Missing global type!");
-    ModuleCU->addGlobalType(GTy.getName(), Entry->getEntry());
+  if (GTy.isCompositeType() && !GTy.getName().empty()
+      && !GTy.isForwardDecl()) {
+    DIEEntry *Entry = TheCU->getDIEEntry(GTy);
+    assert(Entry && "Missing global type!");
+    TheCU->addGlobalType(GTy.getName(), Entry->getEntry());
   }
   return;
 }
 
-void DwarfDebug::constructSubprogramDIE(MDNode *N) {
+/// construct SubprogramDIE - Construct subprogram DIE.
+void DwarfDebug::constructSubprogramDIE(const MDNode *N) {
   DISubprogram SP(N);
 
   // Check for pre-existence.
-  if (ModuleCU->getDIE(N))
+  CompileUnit *TheCU = getCompileUnit(N);
+  if (TheCU->getDIE(N))
     return;
 
   if (!SP.isDefinition())
@@ -1760,13 +1921,13 @@ void DwarfDebug::constructSubprogramDIE(MDNode *N) {
   DIE *SubprogramDie = createSubprogramDIE(SP);
 
   // Add to map.
-  ModuleCU->insertDIE(N, SubprogramDie);
+  TheCU->insertDIE(N, SubprogramDie);
 
   // Add to context owner.
   addToContextOwner(SubprogramDie, SP.getContext());
 
   // Expose as global.
-  ModuleCU->addGlobal(SP.getName(), SubprogramDie);
+  TheCU->addGlobal(SP.getName(), SubprogramDie);
 
   return;
 }
@@ -1774,25 +1935,37 @@ void DwarfDebug::constructSubprogramDIE(MDNode *N) {
 /// beginModule - Emit all Dwarf sections that should come prior to the
 /// content. Create global DIEs and emit initial debug info sections.
 /// This is inovked by the target AsmPrinter.
-void DwarfDebug::beginModule(Module *M, MachineModuleInfo *mmi) {
-  this->M = M;
-
-  if (TimePassesIsEnabled)
-    DebugTimer->startTimer();
-
-  if (!MAI->doesSupportDebugInformation())
+void DwarfDebug::beginModule(Module *M) {
+  if (DisableDebugInfoPrinting)
     return;
 
   DebugInfoFinder DbgFinder;
   DbgFinder.processModule(*M);
 
+  bool HasDebugInfo = false;
+  
+  // Scan all the compile-units to see if there are any marked as the main unit.
+  // if not, we do not generate debug info.
+  for (DebugInfoFinder::iterator I = DbgFinder.compile_unit_begin(),
+       E = DbgFinder.compile_unit_end(); I != E; ++I) {
+    if (DICompileUnit(*I).isMain()) {
+      HasDebugInfo = true;
+      break;
+    }
+  }
+  
+  if (!HasDebugInfo) return;
+
+  // Tell MMI that we have debug info.
+  MMI->setDebugInfoAvailability(true);
+  
+  // Emit initial sections.
+  EmitSectionLabels();
+  
   // Create all the compile unit DIEs.
   for (DebugInfoFinder::iterator I = DbgFinder.compile_unit_begin(),
          E = DbgFinder.compile_unit_end(); I != E; ++I)
     constructCompileUnit(*I);
-
-  if (!ModuleCU)
-    return;
 
   // Create DIEs for each subprogram.
   for (DebugInfoFinder::iterator I = DbgFinder.subprogram_begin(),
@@ -1804,16 +1977,12 @@ void DwarfDebug::beginModule(Module *M, MachineModuleInfo *mmi) {
          E = DbgFinder.global_variable_end(); I != E; ++I)
     constructGlobalVariableDIE(*I);
 
-  MMI = mmi;
-  shouldEmit = true;
-  MMI->setDebugInfoAvailability(true);
-
   // Prime section data.
   SectionMap.insert(Asm->getObjFileLowering().getTextSection());
 
   // Print out .file directives to specify files for .loc directives. These are
   // printed out early so that they precede any .loc directives.
-  if (MAI->hasDotLocAndDotFile()) {
+  if (Asm->MAI->hasDotLocAndDotFile()) {
     for (unsigned i = 1, e = getNumSourceIds()+1; i != e; ++i) {
       // Remember source id starts at 1.
       std::pair<unsigned, unsigned> Id = getSourceDirectoryAndFileIds(i);
@@ -1827,22 +1996,12 @@ void DwarfDebug::beginModule(Module *M, MachineModuleInfo *mmi) {
       Asm->OutStreamer.EmitDwarfFileDirective(i, FullPath.str());
     }
   }
-
-  // Emit initial sections
-  emitInitial();
-
-  if (TimePassesIsEnabled)
-    DebugTimer->stopTimer();
 }
 
 /// endModule - Emit all Dwarf sections that should come after the content.
 ///
 void DwarfDebug::endModule() {
-  if (!ModuleCU)
-    return;
-
-  if (TimePassesIsEnabled)
-    DebugTimer->startTimer();
+  if (!FirstCU) return;
 
   // Attach DW_AT_inline attribute with inlined subprogram DIEs.
   for (SmallPtrSet<DIE *, 4>::iterator AI = InlinedSubprogramDIEs.begin(),
@@ -1851,33 +2010,26 @@ void DwarfDebug::endModule() {
     addUInt(ISP, dwarf::DW_AT_inline, 0, dwarf::DW_INL_inlined);
   }
 
-  // Insert top level DIEs.
-  for (SmallVector<DIE *, 4>::iterator TI = TopLevelDIEsVector.begin(),
-         TE = TopLevelDIEsVector.end(); TI != TE; ++TI)
-    ModuleCU->getCUDie()->addChild(*TI);
-
-  for (DenseMap<DIE *, MDNode *>::iterator CI = ContainingTypeMap.begin(),
+  for (DenseMap<DIE *, const MDNode *>::iterator CI = ContainingTypeMap.begin(),
          CE = ContainingTypeMap.end(); CI != CE; ++CI) {
     DIE *SPDie = CI->first;
-    MDNode *N = dyn_cast_or_null<MDNode>(CI->second);
+    const MDNode *N = dyn_cast_or_null<MDNode>(CI->second);
     if (!N) continue;
-    DIE *NDie = ModuleCU->getDIE(N);
+    DIE *NDie = getCompileUnit(N)->getDIE(N);
     if (!NDie) continue;
     addDIEEntry(SPDie, dwarf::DW_AT_containing_type, dwarf::DW_FORM_ref4, NDie);
-    // FIXME - This is not the correct approach.
-    // addDIEEntry(NDie, dwarf::DW_AT_containing_type, dwarf::DW_FORM_ref4, NDie);
   }
 
   // Standard sections final addresses.
   Asm->OutStreamer.SwitchSection(Asm->getObjFileLowering().getTextSection());
-  Asm->OutStreamer.EmitLabel(getTempLabel("text_end"));
+  Asm->OutStreamer.EmitLabel(Asm->GetTempSymbol("text_end"));
   Asm->OutStreamer.SwitchSection(Asm->getObjFileLowering().getDataSection());
-  Asm->OutStreamer.EmitLabel(getTempLabel("data_end"));
+  Asm->OutStreamer.EmitLabel(Asm->GetTempSymbol("data_end"));
 
   // End text sections.
   for (unsigned i = 1, N = SectionMap.size(); i <= N; ++i) {
     Asm->OutStreamer.SwitchSection(SectionMap[i]);
-    Asm->OutStreamer.EmitLabel(getDWLabel("section_end", i));
+    Asm->OutStreamer.EmitLabel(Asm->GetTempSymbol("section_end", i));
   }
 
   // Emit common frame information.
@@ -1924,30 +2076,30 @@ void DwarfDebug::endModule() {
   // Emit info into a debug str section.
   emitDebugStr();
   
-  delete ModuleCU;
-  ModuleCU = NULL;  // Reset for the next Module, if any.
-
-  if (TimePassesIsEnabled)
-    DebugTimer->stopTimer();
+  for (DenseMap<const MDNode *, CompileUnit *>::iterator I = CUMap.begin(),
+         E = CUMap.end(); I != E; ++I)
+    delete I->second;
+  FirstCU = NULL;  // Reset for the next Module, if any.
 }
 
 /// findAbstractVariable - Find abstract variable, if any, associated with Var.
 DbgVariable *DwarfDebug::findAbstractVariable(DIVariable &Var,
                                               unsigned FrameIdx,
-                                              DILocation &ScopeLoc) {
+                                              DebugLoc ScopeLoc) {
 
-  DbgVariable *AbsDbgVariable = AbstractVariables.lookup(Var.getNode());
+  DbgVariable *AbsDbgVariable = AbstractVariables.lookup(Var);
   if (AbsDbgVariable)
     return AbsDbgVariable;
 
-  DbgScope *Scope = AbstractScopes.lookup(ScopeLoc.getScope().getNode());
+  LLVMContext &Ctx = Var->getContext();
+  DbgScope *Scope = AbstractScopes.lookup(ScopeLoc.getScope(Ctx));
   if (!Scope)
     return NULL;
 
   AbsDbgVariable = new DbgVariable(Var, FrameIdx,
                                    NULL /* No more-abstract variable*/);
   Scope->addVariable(AbsDbgVariable);
-  AbstractVariables[Var.getNode()] = AbsDbgVariable;
+  AbstractVariables[Var] = AbsDbgVariable;
   return AbsDbgVariable;
 }
 
@@ -1955,208 +2107,420 @@ DbgVariable *DwarfDebug::findAbstractVariable(DIVariable &Var,
 /// FIXME : Refactor findAbstractVariable.
 DbgVariable *DwarfDebug::findAbstractVariable(DIVariable &Var,
                                               const MachineInstr *MI,
-                                              DILocation &ScopeLoc) {
+                                              DebugLoc ScopeLoc) {
 
-  DbgVariable *AbsDbgVariable = AbstractVariables.lookup(Var.getNode());
+  DbgVariable *AbsDbgVariable = AbstractVariables.lookup(Var);
   if (AbsDbgVariable)
     return AbsDbgVariable;
 
-  DbgScope *Scope = AbstractScopes.lookup(ScopeLoc.getScope().getNode());
+  LLVMContext &Ctx = Var->getContext();
+  DbgScope *Scope = AbstractScopes.lookup(ScopeLoc.getScope(Ctx));
   if (!Scope)
     return NULL;
 
-  AbsDbgVariable = new DbgVariable(Var, MI, 
+  AbsDbgVariable = new DbgVariable(Var, MI,
                                    NULL /* No more-abstract variable*/);
   Scope->addVariable(AbsDbgVariable);
-  AbstractVariables[Var.getNode()] = AbsDbgVariable;
+  AbstractVariables[Var] = AbsDbgVariable;
+  DbgValueStartMap[MI] = AbsDbgVariable;
   return AbsDbgVariable;
 }
 
 /// collectVariableInfo - Populate DbgScope entries with variables' info.
-void DwarfDebug::collectVariableInfo() {
-  if (!MMI) return;
-
+void DwarfDebug::collectVariableInfo(const MachineFunction *MF) {
+  const LLVMContext &Ctx = Asm->MF->getFunction()->getContext();
+  SmallPtrSet<const MDNode *, 16> Processed;
   MachineModuleInfo::VariableDbgInfoMapTy &VMap = MMI->getVariableDbgInfo();
   for (MachineModuleInfo::VariableDbgInfoMapTy::iterator VI = VMap.begin(),
          VE = VMap.end(); VI != VE; ++VI) {
-    MDNode *Var = VI->first;
+    const MDNode *Var = VI->first;
     if (!Var) continue;
-    DIVariable DV (Var);
-    std::pair< unsigned, MDNode *> VP = VI->second;
-    DILocation ScopeLoc(VP.second);
+    Processed.insert(Var);
+    DIVariable DV(Var);
+    const std::pair<unsigned, DebugLoc> &VP = VI->second;
 
-    DbgScope *Scope =
-      ConcreteScopes.lookup(ScopeLoc.getOrigLocation().getNode());
-    if (!Scope)
-      Scope = DbgScopeMap.lookup(ScopeLoc.getScope().getNode());
+    DbgScope *Scope = 0;
+    if (const MDNode *IA = VP.second.getInlinedAt(Ctx))
+      Scope = ConcreteScopes.lookup(IA);
+    if (Scope == 0)
+      Scope = DbgScopeMap.lookup(VP.second.getScope(Ctx));
+    
     // If variable scope is not found then skip this variable.
-    if (!Scope)
+    if (Scope == 0)
       continue;
 
-    DbgVariable *AbsDbgVariable = findAbstractVariable(DV, VP.first, ScopeLoc);
+    DbgVariable *AbsDbgVariable = findAbstractVariable(DV, VP.first, VP.second);
     DbgVariable *RegVar = new DbgVariable(DV, VP.first, AbsDbgVariable);
     Scope->addVariable(RegVar);
   }
 
   // Collect variable information from DBG_VALUE machine instructions;
-  for (MachineFunction::const_iterator I = MF->begin(), E = MF->end();
+  for (MachineFunction::const_iterator I = Asm->MF->begin(), E = Asm->MF->end();
        I != E; ++I) {
     for (MachineBasicBlock::const_iterator II = I->begin(), IE = I->end();
          II != IE; ++II) {
       const MachineInstr *MInsn = II;
-      if (MInsn->getOpcode() != TargetOpcode::DBG_VALUE)
+      if (!MInsn->isDebugValue())
         continue;
-      // FIXME : Lift this restriction.
-      if (MInsn->getNumOperands() != 3)
+
+      // Ignore Undef values.
+      if (MInsn->getOperand(0).isReg() && !MInsn->getOperand(0).getReg())
         continue;
-      DIVariable DV((MDNode*)(MInsn->getOperand(MInsn->getNumOperands() - 1).getMetadata()));
+
+      DIVariable DV(
+        const_cast<const MDNode *>(MInsn->getOperand(MInsn->getNumOperands() - 1)
+                               .getMetadata()));
       if (DV.getTag() == dwarf::DW_TAG_arg_variable)  {
         // FIXME Handle inlined subroutine arguments.
         DbgVariable *ArgVar = new DbgVariable(DV, MInsn, NULL);
         CurrentFnDbgScope->addVariable(ArgVar);
+        DbgValueStartMap[MInsn] = ArgVar;
+        Processed.insert(DV);
         continue;
       }
 
       DebugLoc DL = MInsn->getDebugLoc();
       if (DL.isUnknown()) continue;
-      DILocation ScopeLoc = MF->getDILocation(DL);
-      DbgScope *Scope =
-        ConcreteScopes.lookup(ScopeLoc.getOrigLocation().getNode());
-      if (!Scope)
-        Scope = DbgScopeMap.lookup(ScopeLoc.getScope().getNode());
+      DbgScope *Scope = 0;
+      if (const MDNode *IA = DL.getInlinedAt(Ctx))
+        Scope = ConcreteScopes.lookup(IA);
+      if (Scope == 0)
+        Scope = DbgScopeMap.lookup(DL.getScope(Ctx));
+      
       // If variable scope is not found then skip this variable.
-      if (!Scope)
+      if (Scope == 0)
         continue;
 
-      DbgVariable *AbsDbgVariable = findAbstractVariable(DV, MInsn,
-                                                         ScopeLoc);
+      Processed.insert(DV);
+      DbgVariable *AbsDbgVariable = findAbstractVariable(DV, MInsn, DL);
       DbgVariable *RegVar = new DbgVariable(DV, MInsn, AbsDbgVariable);
+      DbgValueStartMap[MInsn] = RegVar;
       Scope->addVariable(RegVar);
     }
   }
+
+  // Collect info for variables that were optimized out.
+  if (NamedMDNode *NMD = 
+      MF->getFunction()->getParent()->getNamedMetadata("llvm.dbg.lv")) {
+    for (unsigned i = 0, e = NMD->getNumOperands(); i != e; ++i) {
+      DIVariable DV(cast_or_null<MDNode>(NMD->getOperand(i)));
+      if (!Processed.insert(DV))
+        continue;
+      DbgScope *Scope = DbgScopeMap.lookup(DV.getContext());
+      if (Scope)
+        Scope->addVariable(new DbgVariable(DV, ~0U, NULL));
+    }
+  }
+
 }
 
-/// beginScope - Process beginning of a scope starting at Label.
-void DwarfDebug::beginScope(const MachineInstr *MI, MCSymbol *Label) {
-  InsnToDbgScopeMapTy::iterator I = DbgScopeBeginMap.find(MI);
-  if (I == DbgScopeBeginMap.end())
+/// beginScope - Process beginning of a scope.
+void DwarfDebug::beginScope(const MachineInstr *MI) {
+  // Check location.
+  DebugLoc DL = MI->getDebugLoc();
+  if (DL.isUnknown()) {
+    if (UnknownLocations) {
+      // This instruction has no debug location. If the preceding instruction
+      // did, emit debug location information to indicate that the debug
+      // location is now unknown.
+      MCSymbol *Label = NULL;
+      if (DL == PrevInstLoc)
+        Label = PrevLabel;
+      else {
+        Label = recordSourceLine(DL.getLine(), DL.getCol(), 0);
+        PrevInstLoc = DL;
+        PrevLabel = Label;
+      }
+
+      // If this instruction begins a scope then note down corresponding label.
+      if (InsnsBeginScopeSet.count(MI) != 0)
+        LabelsBeforeInsn[MI] = Label;
+    }
+
     return;
-  ScopeVector &SD = I->second;
-  for (ScopeVector::iterator SDI = SD.begin(), SDE = SD.end();
-       SDI != SDE; ++SDI)
-    (*SDI)->setStartLabel(Label);
+  }
+
+  const MDNode *Scope = DL.getScope(Asm->MF->getFunction()->getContext());
+  
+  // FIXME: Should only verify each scope once!
+  if (!DIScope(Scope).Verify())
+    return;
+
+  // DBG_VALUE instruction establishes new value.
+  if (MI->isDebugValue()) {
+    DenseMap<const MachineInstr *, DbgVariable *>::iterator DI
+      = DbgValueStartMap.find(MI);
+    if (DI != DbgValueStartMap.end()) {
+      MCSymbol *Label = NULL;
+      if (DL == PrevInstLoc)
+        Label = PrevLabel;
+      else {
+        Label = recordSourceLine(DL.getLine(), DL.getCol(), Scope);
+        PrevInstLoc = DL;
+        PrevLabel = Label;
+      }
+      DI->second->setDbgValueLabel(Label);
+    }
+    return;
+  }
+
+  // Emit a label to indicate location change. This is used for line 
+  // table even if this instruction does not start a new scope.
+  MCSymbol *Label = NULL;
+  if (DL == PrevInstLoc)
+    Label = PrevLabel;
+  else {
+    Label = recordSourceLine(DL.getLine(), DL.getCol(), Scope);
+    PrevInstLoc = DL;
+    PrevLabel = Label;
+  }
+
+  // If this instruction begins a scope then note down corresponding label.
+  if (InsnsBeginScopeSet.count(MI) != 0)
+    LabelsBeforeInsn[MI] = Label;
 }
 
 /// endScope - Process end of a scope.
 void DwarfDebug::endScope(const MachineInstr *MI) {
-  InsnToDbgScopeMapTy::iterator I = DbgScopeEndMap.find(MI);
-  if (I == DbgScopeEndMap.end())
-    return;
-
-  MCSymbol *Label = MMI->getContext().CreateTempSymbol();
-  Asm->OutStreamer.EmitLabel(Label);
-
-  SmallVector<DbgScope*, 2> &SD = I->second;
-  for (SmallVector<DbgScope *, 2>::iterator SDI = SD.begin(), SDE = SD.end();
-       SDI != SDE; ++SDI)
-    (*SDI)->setEndLabel(Label);
-  return;
+  if (InsnsEndScopeSet.count(MI) != 0) {
+    // Emit a label if this instruction ends a scope.
+    MCSymbol *Label = MMI->getContext().CreateTempSymbol();
+    Asm->OutStreamer.EmitLabel(Label);
+    LabelsAfterInsn[MI] = Label;
+  }
 }
 
-/// createDbgScope - Create DbgScope for the scope.
-void DwarfDebug::createDbgScope(MDNode *Scope, MDNode *InlinedAt) {
-
+/// getOrCreateDbgScope - Create DbgScope for the scope.
+DbgScope *DwarfDebug::getOrCreateDbgScope(const MDNode *Scope, const MDNode *InlinedAt) {
   if (!InlinedAt) {
     DbgScope *WScope = DbgScopeMap.lookup(Scope);
     if (WScope)
-      return;
+      return WScope;
     WScope = new DbgScope(NULL, DIDescriptor(Scope), NULL);
     DbgScopeMap.insert(std::make_pair(Scope, WScope));
-    if (DIDescriptor(Scope).isLexicalBlock())
-      createDbgScope(DILexicalBlock(Scope).getContext().getNode(), NULL);
-    return;
+    if (DIDescriptor(Scope).isLexicalBlock()) {
+      DbgScope *Parent = 
+        getOrCreateDbgScope(DILexicalBlock(Scope).getContext(), NULL);
+      WScope->setParent(Parent);
+      Parent->addScope(WScope);
+    }
+
+    if (!WScope->getParent()) {
+      StringRef SPName = DISubprogram(Scope).getLinkageName();
+      if (SPName == Asm->MF->getFunction()->getName())
+        CurrentFnDbgScope = WScope;
+    }
+    
+    return WScope;
   }
 
   DbgScope *WScope = DbgScopeMap.lookup(InlinedAt);
   if (WScope)
-    return;
+    return WScope;
 
   WScope = new DbgScope(NULL, DIDescriptor(Scope), InlinedAt);
   DbgScopeMap.insert(std::make_pair(InlinedAt, WScope));
   DILocation DL(InlinedAt);
-  createDbgScope(DL.getScope().getNode(), DL.getOrigLocation().getNode());
+  DbgScope *Parent =
+    getOrCreateDbgScope(DL.getScope(), DL.getOrigLocation());
+  WScope->setParent(Parent);
+  Parent->addScope(WScope);
+
+  ConcreteScopes[InlinedAt] = WScope;
+  getOrCreateAbstractScope(Scope);
+
+  return WScope;
 }
 
+/// hasValidLocation - Return true if debug location entry attached with
+/// machine instruction encodes valid location info.
+static bool hasValidLocation(LLVMContext &Ctx,
+                             const MachineInstr *MInsn,
+                             const MDNode *&Scope, const MDNode *&InlinedAt) {
+  if (MInsn->isDebugValue())
+    return false;
+  DebugLoc DL = MInsn->getDebugLoc();
+  if (DL.isUnknown()) return false;
+      
+  const MDNode *S = DL.getScope(Ctx);
+  
+  // There is no need to create another DIE for compile unit. For all
+  // other scopes, create one DbgScope now. This will be translated
+  // into a scope DIE at the end.
+  if (DIScope(S).isCompileUnit()) return false;
+     
+  Scope = S;
+  InlinedAt = DL.getInlinedAt(Ctx);
+  return true;
+}
+
+/// calculateDominanceGraph - Calculate dominance graph for DbgScope
+/// hierarchy.
+static void calculateDominanceGraph(DbgScope *Scope) {
+  assert (Scope && "Unable to calculate scop edominance graph!");
+  SmallVector<DbgScope *, 4> WorkStack;
+  WorkStack.push_back(Scope);
+  unsigned Counter = 0;
+  while (!WorkStack.empty()) {
+    DbgScope *WS = WorkStack.back();
+    const SmallVector<DbgScope *, 4> &Children = WS->getScopes();
+    bool visitedChildren = false;
+    for (SmallVector<DbgScope *, 4>::const_iterator SI = Children.begin(),
+           SE = Children.end(); SI != SE; ++SI) {
+      DbgScope *ChildScope = *SI;
+      if (!ChildScope->getDFSOut()) {
+        WorkStack.push_back(ChildScope);
+        visitedChildren = true;
+        ChildScope->setDFSIn(++Counter);
+        break;
+      }
+    }
+    if (!visitedChildren) {
+      WorkStack.pop_back();
+      WS->setDFSOut(++Counter);
+    }
+  }
+}
+
+/// printDbgScopeInfo - Print DbgScope info for each machine instruction.
+static 
+void printDbgScopeInfo(LLVMContext &Ctx, const MachineFunction *MF,
+                       DenseMap<const MachineInstr *, DbgScope *> &MI2ScopeMap)
+{
+#ifndef NDEBUG
+  unsigned PrevDFSIn = 0;
+  for (MachineFunction::const_iterator I = MF->begin(), E = MF->end();
+       I != E; ++I) {
+    for (MachineBasicBlock::const_iterator II = I->begin(), IE = I->end();
+         II != IE; ++II) {
+      const MachineInstr *MInsn = II;
+      const MDNode *Scope = NULL;
+      const MDNode *InlinedAt = NULL;
+
+      // Check if instruction has valid location information.
+      if (hasValidLocation(Ctx, MInsn, Scope, InlinedAt)) {
+        dbgs() << " [ ";
+        if (InlinedAt) 
+          dbgs() << "*";
+        DenseMap<const MachineInstr *, DbgScope *>::iterator DI = 
+          MI2ScopeMap.find(MInsn);
+        if (DI != MI2ScopeMap.end()) {
+          DbgScope *S = DI->second;
+          dbgs() << S->getDFSIn();
+          PrevDFSIn = S->getDFSIn();
+        } else
+          dbgs() << PrevDFSIn;
+      } else 
+        dbgs() << " [ x" << PrevDFSIn;
+      dbgs() << " ]";
+      MInsn->dump();
+    }
+    dbgs() << "\n";
+  }
+#endif
+}
 /// extractScopeInformation - Scan machine instructions in this function
-/// and collect DbgScopes. Return true, if atleast one scope was found.
+/// and collect DbgScopes. Return true, if at least one scope was found.
 bool DwarfDebug::extractScopeInformation() {
   // If scope information was extracted using .dbg intrinsics then there is not
   // any need to extract these information by scanning each instruction.
   if (!DbgScopeMap.empty())
     return false;
 
-  DenseMap<const MachineInstr *, unsigned> MIIndexMap;
-  unsigned MIIndex = 0;
   // Scan each instruction and create scopes. First build working set of scopes.
-  for (MachineFunction::const_iterator I = MF->begin(), E = MF->end();
+  LLVMContext &Ctx = Asm->MF->getFunction()->getContext();
+  SmallVector<DbgRange, 4> MIRanges;
+  DenseMap<const MachineInstr *, DbgScope *> MI2ScopeMap;
+  const MDNode *PrevScope = NULL;
+  const MDNode *PrevInlinedAt = NULL;
+  const MachineInstr *RangeBeginMI = NULL;
+  const MachineInstr *PrevMI = NULL;
+  for (MachineFunction::const_iterator I = Asm->MF->begin(), E = Asm->MF->end();
        I != E; ++I) {
     for (MachineBasicBlock::const_iterator II = I->begin(), IE = I->end();
          II != IE; ++II) {
       const MachineInstr *MInsn = II;
-      // FIXME : Remove DBG_VALUE check.
-      if (MInsn->getOpcode() == TargetOpcode::DBG_VALUE) continue;
-      MIIndexMap[MInsn] = MIIndex++;
-      DebugLoc DL = MInsn->getDebugLoc();
-      if (DL.isUnknown()) continue;
-      DILocation DLT = MF->getDILocation(DL);
-      DIScope DLTScope = DLT.getScope();
-      if (!DLTScope.getNode()) continue;
-      // There is no need to create another DIE for compile unit. For all
-      // other scopes, create one DbgScope now. This will be translated
-      // into a scope DIE at the end.
-      if (DLTScope.isCompileUnit()) continue;
-      createDbgScope(DLTScope.getNode(), DLT.getOrigLocation().getNode());
+      const MDNode *Scope = NULL;
+      const MDNode *InlinedAt = NULL;
+
+      // Check if instruction has valid location information.
+      if (!hasValidLocation(Ctx, MInsn, Scope, InlinedAt)) {
+        PrevMI = MInsn;
+        continue;
+      }
+      
+      // If scope has not changed then skip this instruction.
+      if (Scope == PrevScope && PrevInlinedAt == InlinedAt) {
+        PrevMI = MInsn;
+        continue;
+      }
+
+      if (RangeBeginMI) {      
+        // If we have alread seen a beginning of a instruction range and 
+        // current instruction scope does not match scope of first instruction
+        // in this range then create a new instruction range.
+        DbgRange R(RangeBeginMI, PrevMI);
+        MI2ScopeMap[RangeBeginMI] = getOrCreateDbgScope(PrevScope, PrevInlinedAt);
+        MIRanges.push_back(R);
+      } 
+
+      // This is a beginning of a new instruction range.
+      RangeBeginMI = MInsn;
+      
+      // Reset previous markers.
+      PrevMI = MInsn;
+      PrevScope = Scope;
+      PrevInlinedAt = InlinedAt;
     }
   }
 
-
-  // Build scope hierarchy using working set of scopes.
-  for (MachineFunction::const_iterator I = MF->begin(), E = MF->end();
-       I != E; ++I) {
-    for (MachineBasicBlock::const_iterator II = I->begin(), IE = I->end();
-         II != IE; ++II) {
-      const MachineInstr *MInsn = II;
-      // FIXME : Remove DBG_VALUE check.
-      if (MInsn->getOpcode() == TargetOpcode::DBG_VALUE) continue;
-      DebugLoc DL = MInsn->getDebugLoc();
-      if (DL.isUnknown())  continue;
-      DILocation DLT = MF->getDILocation(DL);
-      DIScope DLTScope = DLT.getScope();
-      if (!DLTScope.getNode()) continue;
-      // There is no need to create another DIE for compile unit. For all
-      // other scopes, create one DbgScope now. This will be translated
-      // into a scope DIE at the end.
-      if (DLTScope.isCompileUnit()) continue;
-      DbgScope *Scope = getUpdatedDbgScope(DLTScope.getNode(), MInsn, 
-                                           DLT.getOrigLocation().getNode());
-      Scope->setLastInsn(MInsn);
-    }
+  // Create last instruction range.
+  if (RangeBeginMI && PrevMI && PrevScope) {
+    DbgRange R(RangeBeginMI, PrevMI);
+    MIRanges.push_back(R);
+    MI2ScopeMap[RangeBeginMI] = getOrCreateDbgScope(PrevScope, PrevInlinedAt);
   }
-
+  
   if (!CurrentFnDbgScope)
     return false;
 
-  CurrentFnDbgScope->fixInstructionMarkers(MIIndexMap);
+  calculateDominanceGraph(CurrentFnDbgScope);
+  if (PrintDbgScope)
+    printDbgScopeInfo(Ctx, Asm->MF, MI2ScopeMap);
 
-  // Each scope has first instruction and last instruction to mark beginning
-  // and end of a scope respectively. Create an inverse map that list scopes
-  // starts (and ends) with an instruction. One instruction may start (or end)
-  // multiple scopes. Ignore scopes that are not reachable.
+  // Find ranges of instructions covered by each DbgScope;
+  DbgScope *PrevDbgScope = NULL;
+  for (SmallVector<DbgRange, 4>::const_iterator RI = MIRanges.begin(),
+         RE = MIRanges.end(); RI != RE; ++RI) {
+    const DbgRange &R = *RI;
+    DbgScope *S = MI2ScopeMap.lookup(R.first);
+    assert (S && "Lost DbgScope for a machine instruction!");
+    if (PrevDbgScope && !PrevDbgScope->dominates(S))
+      PrevDbgScope->closeInsnRange(S);
+    S->openInsnRange(R.first);
+    S->extendInsnRange(R.second);
+    PrevDbgScope = S;
+  }
+
+  if (PrevDbgScope)
+    PrevDbgScope->closeInsnRange();
+
+  identifyScopeMarkers();
+
+  return !DbgScopeMap.empty();
+}
+
+/// identifyScopeMarkers() - 
+/// Each DbgScope has first instruction and last instruction to mark beginning
+/// and end of a scope respectively. Create an inverse map that list scopes
+/// starts (and ends) with an instruction. One instruction may start (or end)
+/// multiple scopes. Ignore scopes that are not reachable.
+void DwarfDebug::identifyScopeMarkers() {
   SmallVector<DbgScope *, 4> WorkList;
   WorkList.push_back(CurrentFnDbgScope);
   while (!WorkList.empty()) {
-    DbgScope *S = WorkList.back(); WorkList.pop_back();
-
+    DbgScope *S = WorkList.pop_back_val();
+    
     const SmallVector<DbgScope *, 4> &Children = S->getScopes();
     if (!Children.empty()) 
       for (SmallVector<DbgScope *, 4>::const_iterator SI = Children.begin(),
@@ -2165,80 +2529,77 @@ bool DwarfDebug::extractScopeInformation() {
 
     if (S->isAbstractScope())
       continue;
-    const MachineInstr *MI = S->getFirstInsn();
-    assert (MI && "DbgScope does not have first instruction!");
-
-    InsnToDbgScopeMapTy::iterator IDI = DbgScopeBeginMap.find(MI);
-    if (IDI != DbgScopeBeginMap.end())
-      IDI->second.push_back(S);
-    else
-      DbgScopeBeginMap[MI].push_back(S);
-
-    MI = S->getLastInsn();
-    assert (MI && "DbgScope does not have last instruction!");
-    IDI = DbgScopeEndMap.find(MI);
-    if (IDI != DbgScopeEndMap.end())
-      IDI->second.push_back(S);
-    else
-      DbgScopeEndMap[MI].push_back(S);
+    
+    const SmallVector<DbgRange, 4> &Ranges = S->getRanges();
+    if (Ranges.empty())
+      continue;
+    for (SmallVector<DbgRange, 4>::const_iterator RI = Ranges.begin(),
+           RE = Ranges.end(); RI != RE; ++RI) {
+      assert(RI->first && "DbgRange does not have first instruction!");      
+      assert(RI->second && "DbgRange does not have second instruction!");      
+      InsnsBeginScopeSet.insert(RI->first);
+      InsnsEndScopeSet.insert(RI->second);
+    }
   }
+}
 
-  return !DbgScopeMap.empty();
+/// FindFirstDebugLoc - Find the first debug location in the function. This
+/// is intended to be an approximation for the source position of the
+/// beginning of the function.
+static DebugLoc FindFirstDebugLoc(const MachineFunction *MF) {
+  for (MachineFunction::const_iterator I = MF->begin(), E = MF->end();
+       I != E; ++I)
+    for (MachineBasicBlock::const_iterator MBBI = I->begin(), MBBE = I->end();
+         MBBI != MBBE; ++MBBI) {
+      DebugLoc DL = MBBI->getDebugLoc();
+      if (!DL.isUnknown())
+        return DL;
+    }
+  return DebugLoc();
 }
 
 /// beginFunction - Gather pre-function debug information.  Assumes being
 /// emitted immediately after the function entry point.
 void DwarfDebug::beginFunction(const MachineFunction *MF) {
-  this->MF = MF;
+  if (!MMI->hasDebugInfo()) return;
+  if (!extractScopeInformation()) return;
+  
+  collectVariableInfo(MF);
 
-  if (!ShouldEmitDwarfDebug()) return;
-
-  if (TimePassesIsEnabled)
-    DebugTimer->startTimer();
-
-  if (!extractScopeInformation())
-    return;
-
-  collectVariableInfo();
-
+  FunctionBeginSym = Asm->GetTempSymbol("func_begin",
+                                        Asm->getFunctionNumber());
   // Assumes in correct section after the entry point.
-  Asm->OutStreamer.EmitLabel(getDWLabel("func_begin", ++SubprogramCount));
+  Asm->OutStreamer.EmitLabel(FunctionBeginSym);
 
   // Emit label for the implicitly defined dbg.stoppoint at the start of the
   // function.
-  DebugLoc FDL = MF->getDefaultDebugLoc();
-  if (!FDL.isUnknown()) {
-    DILocation DLT = MF->getDILocation(FDL);
-    DISubprogram SP = getDISubprogram(DLT.getScope().getNode());
-    unsigned Line, Col;
-    if (SP.Verify()) {
-      Line = SP.getLineNumber();
-      Col = 0;
-    } else {
-      Line = DLT.getLineNumber();
-      Col = DLT.getColumnNumber();
-    }
-    
-    recordSourceLine(Line, Col, DLT.getScope().getNode());
+  DebugLoc FDL = FindFirstDebugLoc(MF);
+  if (FDL.isUnknown()) return;
+  
+  const MDNode *Scope = FDL.getScope(MF->getFunction()->getContext());
+  
+  DISubprogram SP = getDISubprogram(Scope);
+  unsigned Line, Col;
+  if (SP.Verify()) {
+    Line = SP.getLineNumber();
+    Col = 0;
+  } else {
+    Line = FDL.getLine();
+    Col = FDL.getCol();
   }
-  if (TimePassesIsEnabled)
-    DebugTimer->stopTimer();
+  
+  recordSourceLine(Line, Col, Scope);
 }
 
 /// endFunction - Gather and emit post-function debug information.
 ///
 void DwarfDebug::endFunction(const MachineFunction *MF) {
-  if (!ShouldEmitDwarfDebug()) return;
-
-  if (TimePassesIsEnabled)
-    DebugTimer->startTimer();
-
-  if (DbgScopeMap.empty())
-    return;
+  if (!MMI->hasDebugInfo() || DbgScopeMap.empty()) return;
 
   if (CurrentFnDbgScope) {
     // Define end label for subprogram.
-    Asm->OutStreamer.EmitLabel(getDWLabel("func_end", SubprogramCount));
+    Asm->OutStreamer.EmitLabel(Asm->GetTempSymbol("func_end",
+                                                  Asm->getFunctionNumber()));
     
     // Get function line info.
     if (!Lines.empty()) {
@@ -2256,83 +2617,67 @@ void DwarfDebug::endFunction(const MachineFunction *MF) {
            AE = AbstractScopesList.end(); AI != AE; ++AI)
       constructScopeDIE(*AI);
     
-    constructScopeDIE(CurrentFnDbgScope);
+    DIE *CurFnDIE = constructScopeDIE(CurrentFnDbgScope);
     
-    DebugFrames.push_back(FunctionDebugFrameInfo(SubprogramCount,
+    if (!DisableFramePointerElim(*MF))
+      addUInt(CurFnDIE, dwarf::DW_AT_APPLE_omit_frame_ptr, 
+              dwarf::DW_FORM_flag, 1);
+
+
+    DebugFrames.push_back(FunctionDebugFrameInfo(Asm->getFunctionNumber(),
                                                  MMI->getFrameMoves()));
   }
 
   // Clear debug info
   CurrentFnDbgScope = NULL;
   DeleteContainerSeconds(DbgScopeMap);
-  DbgScopeBeginMap.clear();
-  DbgScopeEndMap.clear();
+  InsnsBeginScopeSet.clear();
+  InsnsEndScopeSet.clear();
+  DbgValueStartMap.clear();
   ConcreteScopes.clear();
   DeleteContainerSeconds(AbstractScopes);
   AbstractScopesList.clear();
   AbstractVariables.clear();
+  LabelsBeforeInsn.clear();
+  LabelsAfterInsn.clear();
   Lines.clear();
-  
-  if (TimePassesIsEnabled)
-    DebugTimer->stopTimer();
+  PrevLabel = NULL;
 }
 
 /// recordSourceLine - Register a source line with debug info. Returns the
 /// unique label that was emitted and which provides correspondence to
 /// the source line list.
-MCSymbol *DwarfDebug::recordSourceLine(unsigned Line, unsigned Col, MDNode *S) {
-  if (!MMI)
-    return 0;
-
-  if (TimePassesIsEnabled)
-    DebugTimer->startTimer();
-
+MCSymbol *DwarfDebug::recordSourceLine(unsigned Line, unsigned Col, const MDNode *S) {
   StringRef Dir;
   StringRef Fn;
 
-  DIDescriptor Scope(S);
-  if (Scope.isCompileUnit()) {
-    DICompileUnit CU(S);
-    Dir = CU.getDirectory();
-    Fn = CU.getFilename();
-  } else if (Scope.isSubprogram()) {
-    DISubprogram SP(S);
-    Dir = SP.getDirectory();
-    Fn = SP.getFilename();
-  } else if (Scope.isLexicalBlock()) {
-    DILexicalBlock DB(S);
-    Dir = DB.getDirectory();
-    Fn = DB.getFilename();
-  } else
-    assert(0 && "Unexpected scope info");
+  unsigned Src = 1;
+  if (S) {
+    DIDescriptor Scope(S);
 
-  unsigned Src = GetOrCreateSourceID(Dir, Fn);
+    if (Scope.isCompileUnit()) {
+      DICompileUnit CU(S);
+      Dir = CU.getDirectory();
+      Fn = CU.getFilename();
+    } else if (Scope.isSubprogram()) {
+      DISubprogram SP(S);
+      Dir = SP.getDirectory();
+      Fn = SP.getFilename();
+    } else if (Scope.isLexicalBlock()) {
+      DILexicalBlock DB(S);
+      Dir = DB.getDirectory();
+      Fn = DB.getFilename();
+    } else
+      assert(0 && "Unexpected scope info");
+
+    Src = GetOrCreateSourceID(Dir, Fn);
+  }
+
   MCSymbol *Label = MMI->getContext().CreateTempSymbol();
   Lines.push_back(SrcLineInfo(Line, Col, Src, Label));
 
-  if (TimePassesIsEnabled)
-    DebugTimer->stopTimer();
-
   Asm->OutStreamer.EmitLabel(Label);
   return Label;
-}
-
-/// getOrCreateSourceID - Public version of GetOrCreateSourceID. This can be
-/// timed. Look up the source id with the given directory and source file
-/// names. If none currently exists, create a new id and insert it in the
-/// SourceIds map. This can update DirectoryNames and SourceFileNames maps as
-/// well.
-unsigned DwarfDebug::getOrCreateSourceID(const std::string &DirName,
-                                         const std::string &FileName) {
-  if (TimePassesIsEnabled)
-    DebugTimer->startTimer();
-
-  unsigned SrcId = GetOrCreateSourceID(DirName.c_str(), FileName.c_str());
-
-  if (TimePassesIsEnabled)
-    DebugTimer->stopTimer();
-
-  return SrcId;
 }
 
 //===----------------------------------------------------------------------===//
@@ -2347,7 +2692,8 @@ DwarfDebug::computeSizeAndOffset(DIE *Die, unsigned Offset, bool Last) {
   const std::vector<DIE *> &Children = Die->getChildren();
 
   // If not last sibling and has children then add sibling offset attribute.
-  if (!Last && !Children.empty()) Die->addSiblingOffset();
+  if (!Last && !Children.empty())
+    Die->addSiblingOffset(DIEValueAllocator);
 
   // Record the abbreviation.
   assignAbbrevNumber(Die->getAbbrev());
@@ -2368,7 +2714,7 @@ DwarfDebug::computeSizeAndOffset(DIE *Die, unsigned Offset, bool Last) {
   // Size the DIE attribute values.
   for (unsigned i = 0, N = Values.size(); i < N; ++i)
     // Size attribute value.
-    Offset += Values[i]->SizeOf(TD, AbbrevData[i].getForm());
+    Offset += Values[i]->SizeOf(Asm, AbbrevData[i].getForm());
 
   // Size the DIE children if any.
   if (!Children.empty()) {
@@ -2389,61 +2735,63 @@ DwarfDebug::computeSizeAndOffset(DIE *Die, unsigned Offset, bool Last) {
 /// computeSizeAndOffsets - Compute the size and offset of all the DIEs.
 ///
 void DwarfDebug::computeSizeAndOffsets() {
-  // Compute size of compile unit header.
-  static unsigned Offset =
-    sizeof(int32_t) + // Length of Compilation Unit Info
-    sizeof(int16_t) + // DWARF version number
-    sizeof(int32_t) + // Offset Into Abbrev. Section
-    sizeof(int8_t);   // Pointer Size (in bytes)
-
-  computeSizeAndOffset(ModuleCU->getCUDie(), Offset, true);
-  CompileUnitOffsets[ModuleCU] = 0;
+  unsigned PrevOffset = 0;
+  for (DenseMap<const MDNode *, CompileUnit *>::iterator I = CUMap.begin(),
+         E = CUMap.end(); I != E; ++I) {
+    // Compute size of compile unit header.
+    static unsigned Offset = PrevOffset +
+      sizeof(int32_t) + // Length of Compilation Unit Info
+      sizeof(int16_t) + // DWARF version number
+      sizeof(int32_t) + // Offset Into Abbrev. Section
+      sizeof(int8_t);   // Pointer Size (in bytes)
+    computeSizeAndOffset(I->second->getCUDie(), Offset, true);
+    PrevOffset = Offset;
+  }
 }
 
-/// emitInitial - Emit initial Dwarf declarations.  This is necessary for cc
-/// tools to recognize the object file contains Dwarf information.
-void DwarfDebug::emitInitial() {
-  // Check to see if we already emitted intial headers.
-  if (didInitial) return;
-  didInitial = true;
+/// EmitSectionSym - Switch to the specified MCSection and emit an assembler
+/// temporary label to it if SymbolStem is specified.
+static MCSymbol *EmitSectionSym(AsmPrinter *Asm, const MCSection *Section,
+                                const char *SymbolStem = 0) {
+  Asm->OutStreamer.SwitchSection(Section);
+  if (!SymbolStem) return 0;
+  
+  MCSymbol *TmpSym = Asm->GetTempSymbol(SymbolStem);
+  Asm->OutStreamer.EmitLabel(TmpSym);
+  return TmpSym;
+}
 
+/// EmitSectionLabels - Emit initial Dwarf sections with a label at
+/// the start of each one.
+void DwarfDebug::EmitSectionLabels() {
   const TargetLoweringObjectFile &TLOF = Asm->getObjFileLowering();
 
   // Dwarf sections base addresses.
-  if (MAI->doesDwarfRequireFrameSection()) {
-    Asm->OutStreamer.SwitchSection(TLOF.getDwarfFrameSection());
-    Asm->OutStreamer.EmitLabel(getTempLabel("section_debug_frame"));
-  }
+  if (Asm->MAI->doesDwarfRequireFrameSection()) {
+    DwarfFrameSectionSym =
+      EmitSectionSym(Asm, TLOF.getDwarfFrameSection(), "section_debug_frame");
+   }
 
-  Asm->OutStreamer.SwitchSection(TLOF.getDwarfInfoSection());
-  Asm->OutStreamer.EmitLabel(getTempLabel("section_info"));
-  Asm->OutStreamer.SwitchSection(TLOF.getDwarfAbbrevSection());
-  Asm->OutStreamer.EmitLabel(getTempLabel("section_abbrev"));
-  Asm->OutStreamer.SwitchSection(TLOF.getDwarfARangesSection());
-  Asm->OutStreamer.EmitLabel(getTempLabel("section_aranges"));
+  DwarfInfoSectionSym = 
+    EmitSectionSym(Asm, TLOF.getDwarfInfoSection(), "section_info");
+  DwarfAbbrevSectionSym = 
+    EmitSectionSym(Asm, TLOF.getDwarfAbbrevSection(), "section_abbrev");
+  EmitSectionSym(Asm, TLOF.getDwarfARangesSection());
+  
+  if (const MCSection *MacroInfo = TLOF.getDwarfMacroInfoSection())
+    EmitSectionSym(Asm, MacroInfo);
 
-  if (const MCSection *LineInfoDirective = TLOF.getDwarfMacroInfoSection()) {
-    Asm->OutStreamer.SwitchSection(LineInfoDirective);
-    Asm->OutStreamer.EmitLabel(getTempLabel("section_macinfo"));
-  }
+  EmitSectionSym(Asm, TLOF.getDwarfLineSection());
+  EmitSectionSym(Asm, TLOF.getDwarfLocSection());
+  EmitSectionSym(Asm, TLOF.getDwarfPubNamesSection());
+  EmitSectionSym(Asm, TLOF.getDwarfPubTypesSection());
+  DwarfStrSectionSym = 
+    EmitSectionSym(Asm, TLOF.getDwarfStrSection(), "section_str");
+  DwarfDebugRangeSectionSym = EmitSectionSym(Asm, TLOF.getDwarfRangesSection(),
+                                             "debug_range");
 
-  Asm->OutStreamer.SwitchSection(TLOF.getDwarfLineSection());
-  Asm->OutStreamer.EmitLabel(getTempLabel("section_line"));
-  Asm->OutStreamer.SwitchSection(TLOF.getDwarfLocSection());
-  Asm->OutStreamer.EmitLabel(getTempLabel("section_loc"));
-  Asm->OutStreamer.SwitchSection(TLOF.getDwarfPubNamesSection());
-  Asm->OutStreamer.EmitLabel(getTempLabel("section_pubnames"));
-  Asm->OutStreamer.SwitchSection(TLOF.getDwarfPubTypesSection());
-  Asm->OutStreamer.EmitLabel(getTempLabel("section_pubtypes"));
-  Asm->OutStreamer.SwitchSection(TLOF.getDwarfStrSection());
-  Asm->OutStreamer.EmitLabel(getTempLabel("section_str"));
-  Asm->OutStreamer.SwitchSection(TLOF.getDwarfRangesSection());
-  Asm->OutStreamer.EmitLabel(getTempLabel("section_ranges"));
-
-  Asm->OutStreamer.SwitchSection(TLOF.getTextSection());
-  Asm->OutStreamer.EmitLabel(getTempLabel("text_begin"));
-  Asm->OutStreamer.SwitchSection(TLOF.getDataSection());
-  Asm->OutStreamer.EmitLabel(getTempLabel("data_begin"));
+  TextSectionSym = EmitSectionSym(Asm, TLOF.getTextSection(), "text_begin");
+  EmitSectionSym(Asm, TLOF.getDataSection());
 }
 
 /// emitDIE - Recusively Emits a debug information entry.
@@ -2454,14 +2802,14 @@ void DwarfDebug::emitDIE(DIE *Die) {
   const DIEAbbrev *Abbrev = Abbreviations[AbbrevNumber - 1];
 
   // Emit the code (index) for the abbreviation.
-  if (Asm->VerboseAsm)
+  if (Asm->isVerbose())
     Asm->OutStreamer.AddComment("Abbrev [" + Twine(AbbrevNumber) + "] 0x" +
                                 Twine::utohexstr(Die->getOffset()) + ":0x" +
                                 Twine::utohexstr(Die->getSize()) + " " +
                                 dwarf::TagString(Abbrev->getTag()));
-  EmitULEB128(AbbrevNumber);
+  Asm->EmitULEB128(AbbrevNumber);
 
-  SmallVector<DIEValue*, 32> &Values = Die->getValues();
+  const SmallVector<DIEValue*, 32> &Values = Die->getValues();
   const SmallVector<DIEAbbrevData, 8> &AbbrevData = Abbrev->getData();
 
   // Emit the DIE attribute values.
@@ -2470,7 +2818,7 @@ void DwarfDebug::emitDIE(DIE *Die) {
     unsigned Form = AbbrevData[i].getForm();
     assert(Form && "Too many attributes for DIE (check abbreviation)");
 
-    if (Asm->VerboseAsm)
+    if (Asm->isVerbose())
       Asm->OutStreamer.AddComment(dwarf::AttributeString(Attr));
     
     switch (Attr) {
@@ -2484,9 +2832,18 @@ void DwarfDebug::emitDIE(DIE *Die) {
       Asm->EmitInt32(Addr);
       break;
     }
+    case dwarf::DW_AT_ranges: {
+      // DW_AT_range Value encodes offset in debug_range section.
+      DIEInteger *V = cast<DIEInteger>(Values[i]);
+      Asm->EmitLabelOffsetDifference(DwarfDebugRangeSectionSym,
+                                     V->getValue(),
+                                     DwarfDebugRangeSectionSym,
+                                     4);
+      break;
+    }
     default:
       // Emit an attribute using the defined form.
-      Values[i]->EmitValue(this, Form);
+      Values[i]->EmitValue(Asm, Form);
       break;
     }
   }
@@ -2498,7 +2855,7 @@ void DwarfDebug::emitDIE(DIE *Die) {
     for (unsigned j = 0, M = Children.size(); j < M; ++j)
       emitDIE(Children[j]);
 
-    if (Asm->VerboseAsm)
+    if (Asm->isVerbose())
       Asm->OutStreamer.AddComment("End Of Children Mark");
     Asm->EmitInt8(0);
   }
@@ -2510,36 +2867,41 @@ void DwarfDebug::emitDebugInfo() {
   // Start debug info section.
   Asm->OutStreamer.SwitchSection(
                             Asm->getObjFileLowering().getDwarfInfoSection());
-  DIE *Die = ModuleCU->getCUDie();
-
-  // Emit the compile units header.
-  Asm->OutStreamer.EmitLabel(getDWLabel("info_begin", ModuleCU->getID()));
-
-  // Emit size of content not including length itself
-  unsigned ContentSize = Die->getSize() +
-    sizeof(int16_t) + // DWARF version number
-    sizeof(int32_t) + // Offset Into Abbrev. Section
-    sizeof(int8_t) +  // Pointer Size (in bytes)
-    sizeof(int32_t);  // FIXME - extra pad for gdb bug.
-
-  Asm->OutStreamer.AddComment("Length of Compilation Unit Info");
-  Asm->EmitInt32(ContentSize);
-  Asm->OutStreamer.AddComment("DWARF version number");
-  Asm->EmitInt16(dwarf::DWARF_VERSION);
-  Asm->OutStreamer.AddComment("Offset Into Abbrev. Section");
-  EmitSectionOffset(getTempLabel("abbrev_begin"),getTempLabel("section_abbrev"), 
-                    true);
-  Asm->OutStreamer.AddComment("Address Size (in bytes)");
-  Asm->EmitInt8(TD->getPointerSize());
-
-  emitDIE(Die);
-  // FIXME - extra padding for gdb bug.
-  Asm->OutStreamer.AddComment("4 extra padding bytes for GDB");
-  Asm->EmitInt8(0);
-  Asm->EmitInt8(0);
-  Asm->EmitInt8(0);
-  Asm->EmitInt8(0);
-  Asm->OutStreamer.EmitLabel(getDWLabel("info_end", ModuleCU->getID()));
+  for (DenseMap<const MDNode *, CompileUnit *>::iterator I = CUMap.begin(),
+         E = CUMap.end(); I != E; ++I) {
+    CompileUnit *TheCU = I->second;
+    DIE *Die = TheCU->getCUDie();
+    
+    // Emit the compile units header.
+    Asm->OutStreamer.EmitLabel(Asm->GetTempSymbol("info_begin",
+                                                  TheCU->getID()));
+    
+    // Emit size of content not including length itself
+    unsigned ContentSize = Die->getSize() +
+      sizeof(int16_t) + // DWARF version number
+      sizeof(int32_t) + // Offset Into Abbrev. Section
+      sizeof(int8_t) +  // Pointer Size (in bytes)
+      sizeof(int32_t);  // FIXME - extra pad for gdb bug.
+    
+    Asm->OutStreamer.AddComment("Length of Compilation Unit Info");
+    Asm->EmitInt32(ContentSize);
+    Asm->OutStreamer.AddComment("DWARF version number");
+    Asm->EmitInt16(dwarf::DWARF_VERSION);
+    Asm->OutStreamer.AddComment("Offset Into Abbrev. Section");
+    Asm->EmitSectionOffset(Asm->GetTempSymbol("abbrev_begin"),
+                           DwarfAbbrevSectionSym);
+    Asm->OutStreamer.AddComment("Address Size (in bytes)");
+    Asm->EmitInt8(Asm->getTargetData().getPointerSize());
+    
+    emitDIE(Die);
+    // FIXME - extra padding for gdb bug.
+    Asm->OutStreamer.AddComment("4 extra padding bytes for GDB");
+    Asm->EmitInt8(0);
+    Asm->EmitInt8(0);
+    Asm->EmitInt8(0);
+    Asm->EmitInt8(0);
+    Asm->OutStreamer.EmitLabel(Asm->GetTempSymbol("info_end", TheCU->getID()));
+  }
 }
 
 /// emitAbbreviations - Emit the abbreviation section.
@@ -2551,7 +2913,7 @@ void DwarfDebug::emitAbbreviations() const {
     Asm->OutStreamer.SwitchSection(
                             Asm->getObjFileLowering().getDwarfAbbrevSection());
 
-    Asm->OutStreamer.EmitLabel(getTempLabel("abbrev_begin"));
+    Asm->OutStreamer.EmitLabel(Asm->GetTempSymbol("abbrev_begin"));
 
     // For each abbrevation.
     for (unsigned i = 0, N = Abbreviations.size(); i < N; ++i) {
@@ -2559,16 +2921,16 @@ void DwarfDebug::emitAbbreviations() const {
       const DIEAbbrev *Abbrev = Abbreviations[i];
 
       // Emit the abbrevations code (base 1 index.)
-      EmitULEB128(Abbrev->getNumber(), "Abbreviation Code");
+      Asm->EmitULEB128(Abbrev->getNumber(), "Abbreviation Code");
 
       // Emit the abbreviations data.
-      Abbrev->Emit(this);
+      Abbrev->Emit(Asm);
     }
 
     // Mark end of abbreviations.
-    EmitULEB128(0, "EOM(3)");
+    Asm->EmitULEB128(0, "EOM(3)");
 
-    Asm->OutStreamer.EmitLabel(getTempLabel("abbrev_end"));
+    Asm->OutStreamer.EmitLabel(Asm->GetTempSymbol("abbrev_end"));
   }
 }
 
@@ -2581,14 +2943,15 @@ void DwarfDebug::emitEndOfLineMatrix(unsigned SectionEnd) {
   Asm->EmitInt8(0);
   
   Asm->OutStreamer.AddComment("Op size");
-  Asm->EmitInt8(TD->getPointerSize() + 1);
+  Asm->EmitInt8(Asm->getTargetData().getPointerSize() + 1);
   Asm->OutStreamer.AddComment("DW_LNE_set_address");
   Asm->EmitInt8(dwarf::DW_LNE_set_address);
 
   Asm->OutStreamer.AddComment("Section end label");
 
-  Asm->OutStreamer.EmitSymbolValue(getDWLabel("section_end", SectionEnd),
-                                   TD->getPointerSize(), 0/*AddrSpace*/);
+  Asm->OutStreamer.EmitSymbolValue(Asm->GetTempSymbol("section_end",SectionEnd),
+                                   Asm->getTargetData().getPointerSize(),
+                                   0/*AddrSpace*/);
 
   // Mark end of matrix.
   Asm->OutStreamer.AddComment("DW_LNE_end_sequence");
@@ -2602,7 +2965,7 @@ void DwarfDebug::emitEndOfLineMatrix(unsigned SectionEnd) {
 void DwarfDebug::emitDebugLines() {
   // If the target is using .loc/.file, the assembler will be emitting the
   // .debug_line table automatically.
-  if (MAI->hasDotLocAndDotFile())
+  if (Asm->MAI->hasDotLocAndDotFile())
     return;
 
   // Minimum line delta, thus ranging from -10..(255-10).
@@ -2616,16 +2979,17 @@ void DwarfDebug::emitDebugLines() {
 
   // Construct the section header.
   Asm->OutStreamer.AddComment("Length of Source Line Info");
-  EmitDifference(getTempLabel("line_end"), getTempLabel("line_begin"), true);
-  Asm->OutStreamer.EmitLabel(getTempLabel("line_begin"));
+  Asm->EmitLabelDifference(Asm->GetTempSymbol("line_end"),
+                           Asm->GetTempSymbol("line_begin"), 4);
+  Asm->OutStreamer.EmitLabel(Asm->GetTempSymbol("line_begin"));
 
   Asm->OutStreamer.AddComment("DWARF version number");
   Asm->EmitInt16(dwarf::DWARF_VERSION); 
 
   Asm->OutStreamer.AddComment("Prolog Length");
-  EmitDifference(getTempLabel("line_prolog_end"),
-                 getTempLabel("line_prolog_begin"), true);
-  Asm->OutStreamer.EmitLabel(getTempLabel("line_prolog_begin"));
+  Asm->EmitLabelDifference(Asm->GetTempSymbol("line_prolog_end"),
+                           Asm->GetTempSymbol("line_prolog_begin"), 4);
+  Asm->OutStreamer.EmitLabel(Asm->GetTempSymbol("line_prolog_begin"));
 
   Asm->OutStreamer.AddComment("Minimum Instruction Length");
   Asm->EmitInt8(1);
@@ -2661,7 +3025,7 @@ void DwarfDebug::emitDebugLines() {
   // Emit directories.
   for (unsigned DI = 1, DE = getNumSourceDirectories()+1; DI != DE; ++DI) {
     const std::string &Dir = getSourceDirectoryName(DI);
-    if (Asm->VerboseAsm) Asm->OutStreamer.AddComment("Directory");
+    if (Asm->isVerbose()) Asm->OutStreamer.AddComment("Directory");
     Asm->OutStreamer.EmitBytes(StringRef(Dir.c_str(), Dir.size()+1), 0);
   }
 
@@ -2673,18 +3037,18 @@ void DwarfDebug::emitDebugLines() {
     // Remember source id starts at 1.
     std::pair<unsigned, unsigned> Id = getSourceDirectoryAndFileIds(SI);
     const std::string &FN = getSourceFileName(Id.second);
-    if (Asm->VerboseAsm) Asm->OutStreamer.AddComment("Source");
+    if (Asm->isVerbose()) Asm->OutStreamer.AddComment("Source");
     Asm->OutStreamer.EmitBytes(StringRef(FN.c_str(), FN.size()+1), 0);
     
-    EmitULEB128(Id.first, "Directory #");
-    EmitULEB128(0, "Mod date");
-    EmitULEB128(0, "File size");
+    Asm->EmitULEB128(Id.first, "Directory #");
+    Asm->EmitULEB128(0, "Mod date");
+    Asm->EmitULEB128(0, "File size");
   }
 
   Asm->OutStreamer.AddComment("End of files");
   Asm->EmitInt8(0);
 
-  Asm->OutStreamer.EmitLabel(getTempLabel("line_prolog_end"));
+  Asm->OutStreamer.EmitLabel(Asm->GetTempSymbol("line_prolog_end"));
 
   // A sequence for each text section.
   unsigned SecSrcLinesSize = SectionSourceLines.size();
@@ -2703,8 +3067,6 @@ void DwarfDebug::emitDebugLines() {
       MCSymbol *Label = LineInfo.getLabel();
       if (!Label->isDefined()) continue; // Not emitted, in dead code.
 
-      if (LineInfo.getLine() == 0) continue;
-
       if (Asm->isVerbose()) {
         std::pair<unsigned, unsigned> SrcID =
           getSourceDirectoryAndFileIds(LineInfo.getSourceID());
@@ -2718,13 +3080,14 @@ void DwarfDebug::emitDebugLines() {
       Asm->OutStreamer.AddComment("Extended Op");
       Asm->EmitInt8(0);
       Asm->OutStreamer.AddComment("Op size");
-      Asm->EmitInt8(TD->getPointerSize() + 1);
+      Asm->EmitInt8(Asm->getTargetData().getPointerSize() + 1);
 
       Asm->OutStreamer.AddComment("DW_LNE_set_address");
       Asm->EmitInt8(dwarf::DW_LNE_set_address); 
 
       Asm->OutStreamer.AddComment("Location label");
-      Asm->OutStreamer.EmitSymbolValue(Label, TD->getPointerSize(),
+      Asm->OutStreamer.EmitSymbolValue(Label,
+                                       Asm->getTargetData().getPointerSize(),
                                        0/*AddrSpace*/);
       
       // If change of source, then switch to the new source.
@@ -2732,7 +3095,7 @@ void DwarfDebug::emitDebugLines() {
         Source = LineInfo.getSourceID();
         Asm->OutStreamer.AddComment("DW_LNS_set_file");
         Asm->EmitInt8(dwarf::DW_LNS_set_file); 
-        EmitULEB128(Source, "New Source");
+        Asm->EmitULEB128(Source, "New Source");
       }
 
       // If change of line.
@@ -2753,7 +3116,7 @@ void DwarfDebug::emitDebugLines() {
           // ... otherwise use long hand.
           Asm->OutStreamer.AddComment("DW_LNS_advance_line");
           Asm->EmitInt8(dwarf::DW_LNS_advance_line);
-          EmitSLEB128(Offset, "Line Offset");
+          Asm->EmitSLEB128(Offset, "Line Offset");
           Asm->OutStreamer.AddComment("DW_LNS_copy");
           Asm->EmitInt8(dwarf::DW_LNS_copy);
         }
@@ -2773,55 +3136,56 @@ void DwarfDebug::emitDebugLines() {
     // put into it, emit an empty table.
     emitEndOfLineMatrix(1);
 
-  Asm->OutStreamer.EmitLabel(getTempLabel("line_end"));
+  Asm->OutStreamer.EmitLabel(Asm->GetTempSymbol("line_end"));
 }
 
 /// emitCommonDebugFrame - Emit common frame info into a debug frame section.
 ///
 void DwarfDebug::emitCommonDebugFrame() {
-  if (!MAI->doesDwarfRequireFrameSection())
+  if (!Asm->MAI->doesDwarfRequireFrameSection())
     return;
 
-  int stackGrowth =
-    Asm->TM.getFrameInfo()->getStackGrowthDirection() ==
-      TargetFrameInfo::StackGrowsUp ?
-    TD->getPointerSize() : -TD->getPointerSize();
+  int stackGrowth = Asm->getTargetData().getPointerSize();
+  if (Asm->TM.getFrameInfo()->getStackGrowthDirection() ==
+      TargetFrameInfo::StackGrowsDown)
+    stackGrowth *= -1;
 
   // Start the dwarf frame section.
   Asm->OutStreamer.SwitchSection(
                               Asm->getObjFileLowering().getDwarfFrameSection());
 
-  Asm->OutStreamer.EmitLabel(getTempLabel("debug_frame_common"));
+  Asm->OutStreamer.EmitLabel(Asm->GetTempSymbol("debug_frame_common"));
   Asm->OutStreamer.AddComment("Length of Common Information Entry");
-  EmitDifference(getTempLabel("debug_frame_common_end"),
-                 getTempLabel("debug_frame_common_begin"), true);
+  Asm->EmitLabelDifference(Asm->GetTempSymbol("debug_frame_common_end"),
+                           Asm->GetTempSymbol("debug_frame_common_begin"), 4);
 
-  Asm->OutStreamer.EmitLabel(getTempLabel("debug_frame_common_begin"));
+  Asm->OutStreamer.EmitLabel(Asm->GetTempSymbol("debug_frame_common_begin"));
   Asm->OutStreamer.AddComment("CIE Identifier Tag");
   Asm->EmitInt32((int)dwarf::DW_CIE_ID);
   Asm->OutStreamer.AddComment("CIE Version");
   Asm->EmitInt8(dwarf::DW_CIE_VERSION);
   Asm->OutStreamer.AddComment("CIE Augmentation");
   Asm->OutStreamer.EmitIntValue(0, 1, /*addrspace*/0); // nul terminator.
-  EmitULEB128(1, "CIE Code Alignment Factor");
-  EmitSLEB128(stackGrowth, "CIE Data Alignment Factor");
+  Asm->EmitULEB128(1, "CIE Code Alignment Factor");
+  Asm->EmitSLEB128(stackGrowth, "CIE Data Alignment Factor");
   Asm->OutStreamer.AddComment("CIE RA Column");
+  const TargetRegisterInfo *RI = Asm->TM.getRegisterInfo();
   Asm->EmitInt8(RI->getDwarfRegNum(RI->getRARegister(), false));
 
   std::vector<MachineMove> Moves;
   RI->getInitialFrameState(Moves);
 
-  EmitFrameMoves(0, Moves, false);
+  Asm->EmitFrameMoves(Moves, 0, false);
 
-  Asm->EmitAlignment(2, 0, 0, false);
-  Asm->OutStreamer.EmitLabel(getTempLabel("debug_frame_common_end"));
+  Asm->EmitAlignment(2);
+  Asm->OutStreamer.EmitLabel(Asm->GetTempSymbol("debug_frame_common_end"));
 }
 
 /// emitFunctionDebugFrame - Emit per function frame info into a debug frame
 /// section.
 void DwarfDebug::
 emitFunctionDebugFrame(const FunctionDebugFrameInfo &DebugFrameInfo) {
-  if (!MAI->doesDwarfRequireFrameSection())
+  if (!Asm->MAI->doesDwarfRequireFrameSection())
     return;
 
   // Start the dwarf frame section.
@@ -2830,114 +3194,131 @@ emitFunctionDebugFrame(const FunctionDebugFrameInfo &DebugFrameInfo) {
 
   Asm->OutStreamer.AddComment("Length of Frame Information Entry");
   MCSymbol *DebugFrameBegin =
-    getDWLabel("debug_frame_begin", DebugFrameInfo.Number);
+    Asm->GetTempSymbol("debug_frame_begin", DebugFrameInfo.Number);
   MCSymbol *DebugFrameEnd =
-    getDWLabel("debug_frame_end", DebugFrameInfo.Number);
-  EmitDifference(DebugFrameEnd, DebugFrameBegin, true);
+    Asm->GetTempSymbol("debug_frame_end", DebugFrameInfo.Number);
+  Asm->EmitLabelDifference(DebugFrameEnd, DebugFrameBegin, 4);
 
   Asm->OutStreamer.EmitLabel(DebugFrameBegin);
 
   Asm->OutStreamer.AddComment("FDE CIE offset");
-  EmitSectionOffset(getTempLabel("debug_frame_common"), 
-                    getTempLabel("section_debug_frame"), true);
+  Asm->EmitSectionOffset(Asm->GetTempSymbol("debug_frame_common"), 
+                         DwarfFrameSectionSym);
 
   Asm->OutStreamer.AddComment("FDE initial location");
-  MCSymbol *FuncBeginSym = getDWLabel("func_begin", DebugFrameInfo.Number);
+  MCSymbol *FuncBeginSym =
+    Asm->GetTempSymbol("func_begin", DebugFrameInfo.Number);
   Asm->OutStreamer.EmitSymbolValue(FuncBeginSym,
-                                   TD->getPointerSize(), 0/*AddrSpace*/);
+                                   Asm->getTargetData().getPointerSize(),
+                                   0/*AddrSpace*/);
   
   
   Asm->OutStreamer.AddComment("FDE address range");
-  EmitDifference(getDWLabel("func_end", DebugFrameInfo.Number), FuncBeginSym);
+  Asm->EmitLabelDifference(Asm->GetTempSymbol("func_end",DebugFrameInfo.Number),
+                           FuncBeginSym, Asm->getTargetData().getPointerSize());
 
-  EmitFrameMoves(FuncBeginSym, DebugFrameInfo.Moves, false);
+  Asm->EmitFrameMoves(DebugFrameInfo.Moves, FuncBeginSym, false);
 
-  Asm->EmitAlignment(2, 0, 0, false);
+  Asm->EmitAlignment(2);
   Asm->OutStreamer.EmitLabel(DebugFrameEnd);
 }
 
 /// emitDebugPubNames - Emit visible names into a debug pubnames section.
 ///
 void DwarfDebug::emitDebugPubNames() {
-  // Start the dwarf pubnames section.
-  Asm->OutStreamer.SwitchSection(
-                          Asm->getObjFileLowering().getDwarfPubNamesSection());
-
-  Asm->OutStreamer.AddComment("Length of Public Names Info");
-  EmitDifference(getDWLabel("pubnames_end", ModuleCU->getID()),
-                 getDWLabel("pubnames_begin", ModuleCU->getID()), true);
-
-  Asm->OutStreamer.EmitLabel(getDWLabel("pubnames_begin", ModuleCU->getID()));
-
-  Asm->OutStreamer.AddComment("DWARF Version");
-  Asm->EmitInt16(dwarf::DWARF_VERSION); 
-
-  Asm->OutStreamer.AddComment("Offset of Compilation Unit Info");
-  EmitSectionOffset(getDWLabel("info_begin", ModuleCU->getID()), 
-                    getTempLabel("section_info"), true);
-
-  Asm->OutStreamer.AddComment("Compilation Unit Length");
-  EmitDifference(getDWLabel("info_end", ModuleCU->getID()),
-                 getDWLabel("info_begin", ModuleCU->getID()),
-                 true);
-
-  const StringMap<DIE*> &Globals = ModuleCU->getGlobals();
-  for (StringMap<DIE*>::const_iterator
-         GI = Globals.begin(), GE = Globals.end(); GI != GE; ++GI) {
-    const char *Name = GI->getKeyData();
-    DIE *Entity = GI->second;
-
-    Asm->OutStreamer.AddComment("DIE offset");
-    Asm->EmitInt32(Entity->getOffset());
+  for (DenseMap<const MDNode *, CompileUnit *>::iterator I = CUMap.begin(),
+         E = CUMap.end(); I != E; ++I) {
+    CompileUnit *TheCU = I->second;
+    // Start the dwarf pubnames section.
+    Asm->OutStreamer.SwitchSection(
+      Asm->getObjFileLowering().getDwarfPubNamesSection());
     
-    if (Asm->VerboseAsm)
-      Asm->OutStreamer.AddComment("External Name");
-    Asm->OutStreamer.EmitBytes(StringRef(Name, strlen(Name)+1), 0);
+    Asm->OutStreamer.AddComment("Length of Public Names Info");
+    Asm->EmitLabelDifference(
+      Asm->GetTempSymbol("pubnames_end", TheCU->getID()),
+      Asm->GetTempSymbol("pubnames_begin", TheCU->getID()), 4);
+    
+    Asm->OutStreamer.EmitLabel(Asm->GetTempSymbol("pubnames_begin",
+                                                  TheCU->getID()));
+    
+    Asm->OutStreamer.AddComment("DWARF Version");
+    Asm->EmitInt16(dwarf::DWARF_VERSION); 
+    
+    Asm->OutStreamer.AddComment("Offset of Compilation Unit Info");
+    Asm->EmitSectionOffset(Asm->GetTempSymbol("info_begin", TheCU->getID()), 
+                           DwarfInfoSectionSym);
+    
+    Asm->OutStreamer.AddComment("Compilation Unit Length");
+    Asm->EmitLabelDifference(Asm->GetTempSymbol("info_end", TheCU->getID()),
+                             Asm->GetTempSymbol("info_begin", TheCU->getID()),
+                             4);
+    
+    const StringMap<DIE*> &Globals = TheCU->getGlobals();
+    for (StringMap<DIE*>::const_iterator
+           GI = Globals.begin(), GE = Globals.end(); GI != GE; ++GI) {
+      const char *Name = GI->getKeyData();
+      DIE *Entity = GI->second;
+      
+      Asm->OutStreamer.AddComment("DIE offset");
+      Asm->EmitInt32(Entity->getOffset());
+      
+      if (Asm->isVerbose())
+        Asm->OutStreamer.AddComment("External Name");
+      Asm->OutStreamer.EmitBytes(StringRef(Name, strlen(Name)+1), 0);
+    }
+    
+    Asm->OutStreamer.AddComment("End Mark");
+    Asm->EmitInt32(0);
+    Asm->OutStreamer.EmitLabel(Asm->GetTempSymbol("pubnames_end",
+                                                TheCU->getID()));
   }
-
-  Asm->OutStreamer.AddComment("End Mark");
-  Asm->EmitInt32(0);
-  Asm->OutStreamer.EmitLabel(getDWLabel("pubnames_end", ModuleCU->getID()));
 }
 
 void DwarfDebug::emitDebugPubTypes() {
-  // Start the dwarf pubnames section.
-  Asm->OutStreamer.SwitchSection(
-                          Asm->getObjFileLowering().getDwarfPubTypesSection());
-  Asm->OutStreamer.AddComment("Length of Public Types Info");
-  EmitDifference(getDWLabel("pubtypes_end", ModuleCU->getID()),
-                 getDWLabel("pubtypes_begin", ModuleCU->getID()), true);
-
-  Asm->OutStreamer.EmitLabel(getDWLabel("pubtypes_begin", ModuleCU->getID()));
-
-  if (Asm->VerboseAsm) Asm->OutStreamer.AddComment("DWARF Version");
-  Asm->EmitInt16(dwarf::DWARF_VERSION);
-
-  Asm->OutStreamer.AddComment("Offset of Compilation ModuleCU Info");
-  EmitSectionOffset(getDWLabel("info_begin", ModuleCU->getID()),
-                    getTempLabel("section_info"), true);
-
-  Asm->OutStreamer.AddComment("Compilation ModuleCU Length");
-  EmitDifference(getDWLabel("info_end", ModuleCU->getID()),
-                 getDWLabel("info_begin", ModuleCU->getID()),
-                 true);
-
-  const StringMap<DIE*> &Globals = ModuleCU->getGlobalTypes();
-  for (StringMap<DIE*>::const_iterator
-         GI = Globals.begin(), GE = Globals.end(); GI != GE; ++GI) {
-    const char *Name = GI->getKeyData();
-    DIE * Entity = GI->second;
-
-    if (Asm->VerboseAsm) Asm->OutStreamer.AddComment("DIE offset");
-    Asm->EmitInt32(Entity->getOffset());
+  for (DenseMap<const MDNode *, CompileUnit *>::iterator I = CUMap.begin(),
+         E = CUMap.end(); I != E; ++I) {
+    CompileUnit *TheCU = I->second;
+    // Start the dwarf pubnames section.
+    Asm->OutStreamer.SwitchSection(
+      Asm->getObjFileLowering().getDwarfPubTypesSection());
+    Asm->OutStreamer.AddComment("Length of Public Types Info");
+    Asm->EmitLabelDifference(
+      Asm->GetTempSymbol("pubtypes_end", TheCU->getID()),
+      Asm->GetTempSymbol("pubtypes_begin", TheCU->getID()), 4);
     
-    if (Asm->VerboseAsm) Asm->OutStreamer.AddComment("External Name");
-    Asm->OutStreamer.EmitBytes(StringRef(Name, GI->getKeyLength()+1), 0);
+    Asm->OutStreamer.EmitLabel(Asm->GetTempSymbol("pubtypes_begin",
+                                                  TheCU->getID()));
+    
+    if (Asm->isVerbose()) Asm->OutStreamer.AddComment("DWARF Version");
+    Asm->EmitInt16(dwarf::DWARF_VERSION);
+    
+    Asm->OutStreamer.AddComment("Offset of Compilation Unit Info");
+    Asm->EmitSectionOffset(Asm->GetTempSymbol("info_begin", TheCU->getID()),
+                           DwarfInfoSectionSym);
+    
+    Asm->OutStreamer.AddComment("Compilation Unit Length");
+    Asm->EmitLabelDifference(Asm->GetTempSymbol("info_end", TheCU->getID()),
+                             Asm->GetTempSymbol("info_begin", TheCU->getID()),
+                             4);
+    
+    const StringMap<DIE*> &Globals = TheCU->getGlobalTypes();
+    for (StringMap<DIE*>::const_iterator
+           GI = Globals.begin(), GE = Globals.end(); GI != GE; ++GI) {
+      const char *Name = GI->getKeyData();
+      DIE * Entity = GI->second;
+      
+      if (Asm->isVerbose()) Asm->OutStreamer.AddComment("DIE offset");
+      Asm->EmitInt32(Entity->getOffset());
+      
+      if (Asm->isVerbose()) Asm->OutStreamer.AddComment("External Name");
+      Asm->OutStreamer.EmitBytes(StringRef(Name, GI->getKeyLength()+1), 0);
+    }
+    
+    Asm->OutStreamer.AddComment("End Mark");
+    Asm->EmitInt32(0); 
+    Asm->OutStreamer.EmitLabel(Asm->GetTempSymbol("pubtypes_end",
+                                                  TheCU->getID()));
   }
-
-  Asm->OutStreamer.AddComment("End Mark");
-  Asm->EmitInt32(0); 
-  Asm->OutStreamer.EmitLabel(getDWLabel("pubtypes_end", ModuleCU->getID()));
 }
 
 /// emitDebugStr - Emit visible names into a debug str section.
@@ -2991,7 +3372,16 @@ void DwarfDebug::EmitDebugARanges() {
 void DwarfDebug::emitDebugRanges() {
   // Start the dwarf ranges section.
   Asm->OutStreamer.SwitchSection(
-                            Asm->getObjFileLowering().getDwarfRangesSection());
+    Asm->getObjFileLowering().getDwarfRangesSection());
+  unsigned char Size = Asm->getTargetData().getPointerSize();
+  for (SmallVector<const MCSymbol *, 8>::iterator
+         I = DebugRangeSymbols.begin(), E = DebugRangeSymbols.end(); 
+       I != E; ++I) {
+    if (*I)
+      Asm->OutStreamer.EmitSymbolValue(const_cast<MCSymbol*>(*I), Size, 0);
+    else
+      Asm->OutStreamer.EmitIntValue(0, Size, /*addrspace*/0);
+  }
 }
 
 /// emitDebugMacInfo - Emit visible names into a debug macinfo section.
@@ -3023,31 +3413,31 @@ void DwarfDebug::emitDebugMacInfo() {
 /// __debug_info section, and the low_pc is the starting address for the
 /// inlining instance.
 void DwarfDebug::emitDebugInlineInfo() {
-  if (!MAI->doesDwarfUsesInlineInfoSection())
+  if (!Asm->MAI->doesDwarfUsesInlineInfoSection())
     return;
 
-  if (!ModuleCU)
+  if (!FirstCU)
     return;
 
   Asm->OutStreamer.SwitchSection(
                         Asm->getObjFileLowering().getDwarfDebugInlineSection());
 
   Asm->OutStreamer.AddComment("Length of Debug Inlined Information Entry");
-  EmitDifference(getDWLabel("debug_inlined_end", 1),
-                 getDWLabel("debug_inlined_begin", 1), true);
+  Asm->EmitLabelDifference(Asm->GetTempSymbol("debug_inlined_end", 1),
+                           Asm->GetTempSymbol("debug_inlined_begin", 1), 4);
 
-  Asm->OutStreamer.EmitLabel(getDWLabel("debug_inlined_begin", 1));
+  Asm->OutStreamer.EmitLabel(Asm->GetTempSymbol("debug_inlined_begin", 1));
 
   Asm->OutStreamer.AddComment("Dwarf Version");
   Asm->EmitInt16(dwarf::DWARF_VERSION);
   Asm->OutStreamer.AddComment("Address Size (in bytes)");
-  Asm->EmitInt8(TD->getPointerSize());
+  Asm->EmitInt8(Asm->getTargetData().getPointerSize());
 
-  for (SmallVector<MDNode *, 4>::iterator I = InlinedSPNodes.begin(),
+  for (SmallVector<const MDNode *, 4>::iterator I = InlinedSPNodes.begin(),
          E = InlinedSPNodes.end(); I != E; ++I) {
 
-    MDNode *Node = *I;
-    DenseMap<MDNode *, SmallVector<InlineInfoLabels, 4> >::iterator II
+    const MDNode *Node = *I;
+    DenseMap<const MDNode *, SmallVector<InlineInfoLabels, 4> >::iterator II
       = InlineInfo.find(Node);
     SmallVector<InlineInfoLabels, 4> &Labels = II->second;
     DISubprogram SP(Node);
@@ -3059,23 +3449,23 @@ void DwarfDebug::emitDebugInlineInfo() {
       Asm->OutStreamer.EmitBytes(Name, 0);
       Asm->OutStreamer.EmitIntValue(0, 1, 0); // nul terminator.
     } else 
-      EmitSectionOffset(getStringPoolEntry(getRealLinkageName(LName)),
-                        getTempLabel("section_str"), true);
+      Asm->EmitSectionOffset(getStringPoolEntry(getRealLinkageName(LName)),
+                             DwarfStrSectionSym);
 
     Asm->OutStreamer.AddComment("Function name");
-    EmitSectionOffset(getStringPoolEntry(Name), getTempLabel("section_str"), 
-                      true);
-    EmitULEB128(Labels.size(), "Inline count");
+    Asm->EmitSectionOffset(getStringPoolEntry(Name), DwarfStrSectionSym);
+    Asm->EmitULEB128(Labels.size(), "Inline count");
 
     for (SmallVector<InlineInfoLabels, 4>::iterator LI = Labels.begin(),
            LE = Labels.end(); LI != LE; ++LI) {
-      if (Asm->VerboseAsm) Asm->OutStreamer.AddComment("DIE offset");
+      if (Asm->isVerbose()) Asm->OutStreamer.AddComment("DIE offset");
       Asm->EmitInt32(LI->second->getOffset());
 
-      if (Asm->VerboseAsm) Asm->OutStreamer.AddComment("low_pc");
-      Asm->OutStreamer.EmitSymbolValue(LI->first, TD->getPointerSize(), 0);
+      if (Asm->isVerbose()) Asm->OutStreamer.AddComment("low_pc");
+      Asm->OutStreamer.EmitSymbolValue(LI->first,
+                                       Asm->getTargetData().getPointerSize(),0);
     }
   }
 
-  Asm->OutStreamer.EmitLabel(getDWLabel("debug_inlined_end", 1));
+  Asm->OutStreamer.EmitLabel(Asm->GetTempSymbol("debug_inlined_end", 1));
 }

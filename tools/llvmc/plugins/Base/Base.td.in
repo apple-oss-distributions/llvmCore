@@ -46,6 +46,8 @@ def OptList : OptionList<[
     (help "Relocation model: PIC"), (hidden)),
  (switch_option "mdynamic-no-pic",
     (help "Relocation model: dynamic-no-pic"), (hidden)),
+ (switch_option "shared",
+     (help "Create a DLL instead of the regular executable")),
  (parameter_option "linker",
     (help "Choose linker (possible values: gcc, g++)")),
  (parameter_option "mtune",
@@ -233,6 +235,8 @@ def llvm_gcc_assembler : Tool<
           (switch_on "c"), (stop_compilation),
           (not_empty "arch"), (forward "arch"),
           (not_empty "Xassembler"), (forward "Xassembler"),
+          (switch_on "m32"), (forward "m32"),
+          (switch_on "m64"), (forward "m64"),
           (not_empty "Wa,"), (forward "Wa,")))
 ]>;
 
@@ -240,7 +244,7 @@ def llc : Tool<
 [(in_language ["llvm-bitcode", "llvm-assembler"]),
  (out_language "assembler"),
  (output_suffix "s"),
- (command "llc -f"),
+ (command "llc"),
  (actions (case
           (switch_on "S"), (stop_compilation),
           (switch_on "O0"), (forward "O0"),
@@ -259,7 +263,7 @@ def llc : Tool<
 
 // Base class for linkers
 class llvm_gcc_based_linker <string cmd_prefix> : Tool<
-[(in_language "object-code"),
+[(in_language ["object-code", "static-library"]),
  (out_language "executable"),
  (output_suffix "out"),
  (command cmd_prefix),
@@ -279,6 +283,7 @@ class llvm_gcc_based_linker <string cmd_prefix> : Tool<
           (not_empty "l"), (forward "l"),
           (not_empty "Xlinker"), (forward "Xlinker"),
           (not_empty "Wl,"), (forward "Wl,"),
+          (switch_on "shared"), (forward "shared"),
           (switch_on "dynamiclib"), (forward "dynamiclib"),
           (switch_on "prebind"), (forward "prebind"),
           (switch_on "dead_strip"), (forward "dead_strip"),
@@ -312,6 +317,7 @@ def LanguageMap : LanguageMap<
      LangToSuffixes<"llvm-assembler", ["ll"]>,
      LangToSuffixes<"llvm-bitcode", ["bc"]>,
      LangToSuffixes<"object-code", ["o", "*empty*"]>,
+     LangToSuffixes<"static-library", ["a", "lib"]>,
      LangToSuffixes<"executable", ["out"]>
      ]>;
 

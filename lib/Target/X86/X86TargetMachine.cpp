@@ -22,7 +22,7 @@
 #include "llvm/Target/TargetRegistry.h"
 using namespace llvm;
 
-static const MCAsmInfo *createMCAsmInfo(const Target &T, StringRef TT) {
+static MCAsmInfo *createMCAsmInfo(const Target &T, StringRef TT) {
   Triple TheTriple(TT);
   switch (TheTriple.getOS()) {
   case Triple::Darwin:
@@ -82,7 +82,8 @@ X86TargetMachine::X86TargetMachine(const Target &T, const std::string &TT,
               Subtarget.getStackAlignment(),
               (Subtarget.isTargetWin64() ? -40 :
                (Subtarget.is64Bit() ? -8 : -4))),
-    InstrInfo(*this), JITInfo(*this), TLInfo(*this), ELFWriterInfo(*this) {
+    InstrInfo(*this), JITInfo(*this), TLInfo(*this), TSInfo(*this),
+    ELFWriterInfo(*this) {
   DefRelocModel = getRelocationModel();
       
   // If no relocation model was picked, default as appropriate for the target.
@@ -160,6 +161,7 @@ bool X86TargetMachine::addInstSelector(PassManagerBase &PM,
 
 bool X86TargetMachine::addPreRegAlloc(PassManagerBase &PM,
                                       CodeGenOpt::Level OptLevel) {
+  PM.add(createX86MaxStackAlignmentHeuristicPass());
   return false;  // -print-machineinstr shouldn't print after this.
 }
 
@@ -167,6 +169,15 @@ bool X86TargetMachine::addPostRegAlloc(PassManagerBase &PM,
                                        CodeGenOpt::Level OptLevel) {
   PM.add(createX86FloatingPointStackifierPass());
   return true;  // -print-machineinstr should print after this.
+}
+
+bool X86TargetMachine::addPreEmitPass(PassManagerBase &PM,
+                                      CodeGenOpt::Level OptLevel) {
+  if (OptLevel != CodeGenOpt::None && Subtarget.hasSSE2()) {
+    PM.add(createSSEDomainFixPass());
+    return true;
+  }
+  return false;
 }
 
 bool X86TargetMachine::addCodeEmitter(PassManagerBase &PM,

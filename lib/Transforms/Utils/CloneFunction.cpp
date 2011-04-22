@@ -23,7 +23,7 @@
 #include "llvm/LLVMContext.h"
 #include "llvm/Metadata.h"
 #include "llvm/Support/CFG.h"
-#include "llvm/Transforms/Utils/ValueMapper.h"
+#include "ValueMapper.h"
 #include "llvm/Analysis/ConstantFolding.h"
 #include "llvm/Analysis/DebugInfo.h"
 #include "llvm/ADT/SmallVector.h"
@@ -344,7 +344,7 @@ static MDNode *UpdateInlinedAtInfo(MDNode *InsnMD, MDNode *TheCallMD) {
   DILocation OrigLocation = ILoc.getOrigLocation();
   MDNode *NewLoc = TheCallMD;
   if (OrigLocation.Verify())
-    NewLoc = UpdateInlinedAtInfo(OrigLocation.getNode(), TheCallMD);
+    NewLoc = UpdateInlinedAtInfo(OrigLocation, TheCallMD);
 
   Value *MDVs[] = {
     InsnMD->getOperand(0), // Line

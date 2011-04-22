@@ -609,6 +609,11 @@ public:
       if (!getBit(i)->isComplete()) return false;
     return true;
   }
+  bool allInComplete() const {
+    for (unsigned i = 0; i != getNumBits(); ++i)
+      if (getBit(i)->isComplete()) return false;
+    return true;
+  }
   virtual std::string getAsString() const;
 
   virtual Init *resolveReferences(Record &R, const RecordVal *RV);
@@ -1261,9 +1266,6 @@ public:
       if (Values[i].getName() == Name) return &Values[i];
     return 0;
   }
-
-  // Like getValue, but allow dotting into members: X.Y
-  RecordVal *getDottedValue(StringRef Name);
 
   void addTemplateArg(StringRef Name) {
     assert(!isTemplateArg(Name) && "Template arg already defined!");

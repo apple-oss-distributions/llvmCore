@@ -59,7 +59,7 @@ GetJumpTableSymbol(const MachineOperand &MO) const {
   }
 
   // Create a symbol for the name.
-  return Ctx.GetOrCreateTemporarySymbol(Name.str());
+  return Ctx.GetOrCreateSymbol(Name.str());
 }
 
 MCSymbol *MSP430MCInstLower::
@@ -75,7 +75,17 @@ GetConstantPoolIndexSymbol(const MachineOperand &MO) const {
   }
 
   // Create a symbol for the name.
-  return Ctx.GetOrCreateTemporarySymbol(Name.str());
+  return Ctx.GetOrCreateSymbol(Name.str());
+}
+
+MCSymbol *MSP430MCInstLower::
+GetBlockAddressSymbol(const MachineOperand &MO) const {
+  switch (MO.getTargetFlags()) {
+  default: assert(0 && "Unknown target flag on GV operand");
+  case 0: break;
+  }
+
+  return Printer.GetBlockAddressSymbol(MO.getBlockAddress());
 }
 
 MCOperand MSP430MCInstLower::
@@ -131,6 +141,8 @@ void MSP430MCInstLower::Lower(const MachineInstr *MI, MCInst &OutMI) const {
     case MachineOperand::MO_ConstantPoolIndex:
       MCOp = LowerSymbolOperand(MO, GetConstantPoolIndexSymbol(MO));
       break;
+    case MachineOperand::MO_BlockAddress:
+      MCOp = LowerSymbolOperand(MO, GetBlockAddressSymbol(MO));
     }
 
     OutMI.addOperand(MCOp);

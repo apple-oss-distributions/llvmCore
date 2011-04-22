@@ -333,8 +333,9 @@ The TableGen types are:</p>
   <dd>This type represents a nestable directed graph of elements.</dd>
 
 <dt><tt><b>code</b></tt></dt>
-  <dd>This represents a big hunk of text. NOTE: I don't remember why this is
-  distinct from string!</dd>
+  <dd>This represents a big hunk of text.  This is lexically distinct from 
+  string values because it doesn't require escapeing double quotes and other
+  common characters that occur in code.</dd>
 </dl>
 
 <p>To date, these types have been sufficient for describing things that
@@ -768,9 +769,6 @@ patterns:</p>
   <dd>an implicitly defined physical register.  This tells the dag instruction
   selection emitter the input pattern's extra definitions matches implicit
   physical register definitions.</dd>
-<dt><tt>(parallel (a), (b))</tt></dt>
-  <dd>a list of dags specifying parallel operations which map to the same
-  instruction.</dd>
 
 </div>
 
@@ -797,7 +795,7 @@ This should highlight the APIs in <tt>TableGen/Record.h</tt>.</p>
 
   <a href="mailto:sabre@nondot.org">Chris Lattner</a><br>
   <a href="http://llvm.org">LLVM Compiler Infrastructure</a><br>
-  Last modified: $Date: 2010-02-27 15:47:46 -0800 (Sat, 27 Feb 2010) $
+  Last modified: $Date: 2010-05-06 17:28:04 -0700 (Thu, 06 May 2010) $
 </address>
 
 </body>

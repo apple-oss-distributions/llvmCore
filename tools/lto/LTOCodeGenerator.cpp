@@ -24,8 +24,6 @@
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/Triple.h"
 #include "llvm/Analysis/Passes.h"
-#include "llvm/Analysis/LoopPass.h"
-#include "llvm/Analysis/Verifier.h"
 #include "llvm/Bitcode/ReaderWriter.h"
 #include "llvm/MC/MCAsmInfo.h"
 #include "llvm/MC/MCContext.h"
@@ -36,8 +34,6 @@
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/Target/TargetRegistry.h"
 #include "llvm/Target/TargetSelect.h"
-#include "llvm/Transforms/IPO.h"
-#include "llvm/Transforms/Scalar.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/FormattedStream.h"
 #include "llvm/Support/MemoryBuffer.h"
@@ -304,8 +300,9 @@ bool LTOCodeGenerator::determineTarget(std::string& errMsg)
         }
 
         // construct LTModule, hand over ownership of module and target
-        const std::string FeatureStr =
-           SubtargetFeatures::getDefaultSubtargetFeatures(llvm::Triple(Triple));
+        SubtargetFeatures Features;
+        Features.getDefaultSubtargetFeatures("" /* cpu */, llvm::Triple(Triple));
+        std::string FeatureStr = Features.getString();
         _target = march->createTargetMachine(Triple, FeatureStr);
     }
     return false;
@@ -332,7 +329,7 @@ void LTOCodeGenerator::applyScopeRestrictions() {
     }
     for (Module::global_iterator v = mergedModule->global_begin(), 
          e = mergedModule->global_end(); v !=  e; ++v) {
-      if (v->isDeclaration() &&
+      if (!v->isDeclaration() &&
           _mustPreserveSymbols.count(mangler.getNameWithPrefix(v)))
         mustPreserveList.push_back(::strdup(v->getNameStr().c_str()));
     }
@@ -357,24 +354,10 @@ bool LTOCodeGenerator::generateAssemblyCode(formatted_raw_ostream& out,
 
     Module* mergedModule = _linker.getModule();
 
-    // If target supports exception handling then enable it now.
-    switch (_target->getMCAsmInfo()->getExceptionHandlingType()) {
-    case ExceptionHandling::Dwarf:
-      llvm::DwarfExceptionHandling = true;
-      break;
-    case ExceptionHandling::SjLj:
-      llvm::SjLjExceptionHandling = true;
-      break;
-    case ExceptionHandling::None:
-      break;
-    default:
-      assert (0 && "Unknown exception handling model!");
-    }
-
     // if options were requested, set them
     if ( !_codegenOptions.empty() )
         cl::ParseCommandLineOptions(_codegenOptions.size(), 
-                                                (char**)&_codegenOptions[0]);
+                                    const_cast<char **>(&_codegenOptions[0]));
 
     // Instantiate the pass manager to organize the passes.
     PassManager passes;

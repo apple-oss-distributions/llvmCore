@@ -125,13 +125,18 @@ static cl::opt<std::string> CO9("m", cl::Hidden,
 /// everywhere.
 static std::string progname;
 
+/// FileRemover objects to clean up output files in the event of an error.
+static FileRemover OutputRemover;
+static FileRemover BitcodeOutputRemover;
+
 /// PrintAndExit - Prints a message to standard error and exits with error code
 ///
 /// Inputs:
 ///  Message  - The message to print to standard error.
 ///
-static void PrintAndExit(const std::string &Message, int errcode = 1) {
+static void PrintAndExit(const std::string &Message, Module *M, int errcode = 1) {
   errs() << progname << ": " << Message << "\n";
+  delete M;
   llvm_shutdown();
   exit(errcode);
 }
@@ -234,17 +239,10 @@ void GenerateBitcode(Module* M, const std::string& FileName) {
   raw_fd_ostream Out(FileName.c_str(), ErrorInfo,
                      raw_fd_ostream::F_Binary);
   if (!ErrorInfo.empty())
-    PrintAndExit(ErrorInfo);
-
-  // Ensure that the bitcode file gets removed from the disk if we get a
-  // terminating signal.
-  sys::RemoveFileOnSignal(sys::Path(FileName));
+    PrintAndExit(ErrorInfo, M);
 
   // Write it out
   WriteBitcodeToFile(M, Out);
-
-  // Close the bitcode file.
-  Out.close();
 }
 
 /// GenerateAssembly - generates a native assembly language source file from the
@@ -268,7 +266,6 @@ static int GenerateAssembly(const std::string &OutputFilename,
   // We will use GCC to assemble the program so set the assembly syntax to AT&T,
   // regardless of what the target in the bitcode file is.
   args.push_back("-x86-asm-syntax=att");
-  args.push_back("-f");
   args.push_back("-o");
   args.push_back(OutputFilename.c_str());
   args.push_back(InputFilename.c_str());
@@ -291,7 +288,6 @@ static int GenerateCFile(const std::string &OutputFile,
   std::vector<const char*> args;
   args.push_back(llc.c_str());
   args.push_back("-march=c");
-  args.push_back("-f");
   args.push_back("-o");
   args.push_back(OutputFile.c_str());
   args.push_back(InputFile.c_str());
@@ -401,14 +397,14 @@ static int GenerateNative(const std::string &OutputFilename,
 
   // Run the compiler to assembly and link together the program.
   int R = sys::Program::ExecuteAndWait(
-    gcc, &Args[0], (const char**)clean_env, 0, 0, 0, &ErrMsg);
+    gcc, &Args[0], const_cast<const char **>(clean_env), 0, 0, 0, &ErrMsg);
   delete [] clean_env;
   return R;
 }
 
 /// EmitShellScript - Output the wrapper file that invokes the JIT on the LLVM
 /// bitcode file for the program.
-static void EmitShellScript(char **argv) {
+static void EmitShellScript(char **argv, Module *M) {
   if (Verbose)
     outs() << "Emitting Shell Script\n";
 #if defined(_WIN32) || defined(__CYGWIN__)
@@ -419,10 +415,10 @@ static void EmitShellScript(char **argv) {
   sys::Path llvmstub = FindExecutable("llvm-stub.exe", argv[0],
                                       (void *)(intptr_t)&Optimize);
   if (llvmstub.isEmpty())
-    PrintAndExit("Could not find llvm-stub.exe executable!");
+    PrintAndExit("Could not find llvm-stub.exe executable!", M);
 
   if (0 != sys::CopyFile(sys::Path(OutputFilename), llvmstub, &ErrMsg))
-    PrintAndExit(ErrMsg);
+    PrintAndExit(ErrMsg, M);
 
   return;
 #endif
@@ -431,7 +427,7 @@ static void EmitShellScript(char **argv) {
   std::string ErrorInfo;
   raw_fd_ostream Out2(OutputFilename.c_str(), ErrorInfo);
   if (!ErrorInfo.empty())
-    PrintAndExit(ErrorInfo);
+    PrintAndExit(ErrorInfo, M);
 
   Out2 << "#!/bin/sh\n";
   // Allow user to setenv LLVMINTERP if lli is not in their PATH.
@@ -470,7 +466,6 @@ static void EmitShellScript(char **argv) {
       Out2 << "    -load=" << FullLibraryPath.str() << " \\\n";
   }
   Out2 << "    "  << BitcodeOutputFilename << " ${1+\"$@\"}\n";
-  Out2.close();
 }
 
 // BuildLinkItems -- This function generates a LinkItemList for the LinkItems
@@ -521,6 +516,39 @@ int main(int argc, char **argv, char **envp) {
   // Parse the command line options
   cl::ParseCommandLineOptions(argc, argv, "llvm linker\n");
 
+#if defined(_WIN32) || defined(__CYGWIN__)
+  if (!LinkAsLibrary) {
+    // Default to "a.exe" instead of "a.out".
+    if (OutputFilename.getNumOccurrences() == 0)
+      OutputFilename = "a.exe";
+
+    // If there is no suffix add an "exe" one.
+    sys::Path ExeFile( OutputFilename );
+    if (ExeFile.getSuffix() == "") {
+      ExeFile.appendSuffix("exe");
+      OutputFilename = ExeFile.str();
+    }
+  }
+#endif
+
+  // Generate the bitcode for the optimized module.
+  // If -b wasn't specified, use the name specified
+  // with -o to construct BitcodeOutputFilename.
+  if (BitcodeOutputFilename.empty()) {
+    BitcodeOutputFilename = OutputFilename;
+    if (!LinkAsLibrary) BitcodeOutputFilename += ".bc";
+  }
+
+  // Arrange for the bitcode output file to be deleted on any errors.
+  BitcodeOutputRemover.setFile(sys::Path(BitcodeOutputFilename));
+  sys::RemoveFileOnSignal(sys::Path(BitcodeOutputFilename));
+
+  // Arrange for the output file to be deleted on any errors.
+  if (!LinkAsLibrary) {
+    OutputRemover.setFile(sys::Path(OutputFilename));
+    sys::RemoveFileOnSignal(sys::Path(OutputFilename));
+  }
+
   // Construct a Linker (now that Verbose is set)
   Linker TheLinker(progname, OutputFilename, Context, Verbose);
 
@@ -563,29 +591,7 @@ int main(int argc, char **argv, char **envp) {
   // Optimize the module
   Optimize(Composite.get());
 
-#if defined(_WIN32) || defined(__CYGWIN__)
-  if (!LinkAsLibrary) {
-    // Default to "a.exe" instead of "a.out".
-    if (OutputFilename.getNumOccurrences() == 0)
-      OutputFilename = "a.exe";
-
-    // If there is no suffix add an "exe" one.
-    sys::Path ExeFile( OutputFilename );
-    if (ExeFile.getSuffix() == "") {
-      ExeFile.appendSuffix("exe");
-      OutputFilename = ExeFile.str();
-    }
-  }
-#endif
-
-  // Generate the bitcode for the optimized module.
-  // If -b wasn't specified, use the name specified
-  // with -o to construct BitcodeOutputFilename.
-  if (BitcodeOutputFilename.empty()) {
-    BitcodeOutputFilename = OutputFilename;
-    if (!LinkAsLibrary) BitcodeOutputFilename += ".bc";
-  }
-
+  // Generate the bitcode output.
   GenerateBitcode(Composite.get(), BitcodeOutputFilename);
 
   // If we are not linking a library, generate either a native executable
@@ -601,13 +607,13 @@ int main(int argc, char **argv, char **envp) {
           prog = sys::Program::FindProgramByName(*I);
           if (prog.isEmpty())
             PrintAndExit(std::string("Optimization program '") + *I +
-              "' is not found or not executable.");
+                         "' is not found or not executable.", Composite.get());
         }
         // Get the program arguments
         sys::Path tmp_output("opt_result");
         std::string ErrMsg;
         if (tmp_output.createTemporaryFileOnDisk(true, &ErrMsg))
-          PrintAndExit(ErrMsg);
+          PrintAndExit(ErrMsg, Composite.get());
 
         const char* args[4];
         args[0] = I->c_str();
@@ -615,15 +621,16 @@ int main(int argc, char **argv, char **envp) {
         args[2] = tmp_output.c_str();
         args[3] = 0;
         if (0 == sys::Program::ExecuteAndWait(prog, args, 0,0,0,0, &ErrMsg)) {
-          if (tmp_output.isBitcodeFile() || tmp_output.isBitcodeFile()) {
+          if (tmp_output.isBitcodeFile()) {
             sys::Path target(BitcodeOutputFilename);
             target.eraseFromDisk();
             if (tmp_output.renamePathOnDisk(target, &ErrMsg))
-              PrintAndExit(ErrMsg, 2);
+              PrintAndExit(ErrMsg, Composite.get(), 2);
           } else
-            PrintAndExit("Post-link optimization output is not bitcode");
+            PrintAndExit("Post-link optimization output is not bitcode",
+                         Composite.get());
         } else {
-          PrintAndExit(ErrMsg);
+          PrintAndExit(ErrMsg, Composite.get());
         }
       }
     }
@@ -637,78 +644,76 @@ int main(int argc, char **argv, char **envp) {
       sys::Path AssemblyFile ( OutputFilename);
       AssemblyFile.appendSuffix("s");
 
-      // Mark the output files for removal if we get an interrupt.
+      // Mark the output files for removal.
+      FileRemover AssemblyFileRemover(AssemblyFile);
       sys::RemoveFileOnSignal(AssemblyFile);
-      sys::RemoveFileOnSignal(sys::Path(OutputFilename));
 
       // Determine the locations of the llc and gcc programs.
       sys::Path llc = FindExecutable("llc", argv[0],
                                      (void *)(intptr_t)&Optimize);
       if (llc.isEmpty())
-        PrintAndExit("Failed to find llc");
+        PrintAndExit("Failed to find llc", Composite.get());
 
       sys::Path gcc = sys::Program::FindProgramByName("gcc");
       if (gcc.isEmpty())
-        PrintAndExit("Failed to find gcc");
+        PrintAndExit("Failed to find gcc", Composite.get());
 
       // Generate an assembly language file for the bitcode.
       std::string ErrMsg;
       if (0 != GenerateAssembly(AssemblyFile.str(), BitcodeOutputFilename,
           llc, ErrMsg))
-        PrintAndExit(ErrMsg);
+        PrintAndExit(ErrMsg, Composite.get());
 
       if (0 != GenerateNative(OutputFilename, AssemblyFile.str(),
                               NativeLinkItems, gcc, envp, ErrMsg))
-        PrintAndExit(ErrMsg);
-
-      // Remove the assembly language file.
-      AssemblyFile.eraseFromDisk();
+        PrintAndExit(ErrMsg, Composite.get());
     } else if (NativeCBE) {
       sys::Path CFile (OutputFilename);
       CFile.appendSuffix("cbe.c");
 
-      // Mark the output files for removal if we get an interrupt.
+      // Mark the output files for removal.
+      FileRemover CFileRemover(CFile);
       sys::RemoveFileOnSignal(CFile);
-      sys::RemoveFileOnSignal(sys::Path(OutputFilename));
 
       // Determine the locations of the llc and gcc programs.
       sys::Path llc = FindExecutable("llc", argv[0],
                                      (void *)(intptr_t)&Optimize);
       if (llc.isEmpty())
-        PrintAndExit("Failed to find llc");
+        PrintAndExit("Failed to find llc", Composite.get());
 
       sys::Path gcc = sys::Program::FindProgramByName("gcc");
       if (gcc.isEmpty())
-        PrintAndExit("Failed to find gcc");
+        PrintAndExit("Failed to find gcc", Composite.get());
 
       // Generate an assembly language file for the bitcode.
       std::string ErrMsg;
       if (GenerateCFile(CFile.str(), BitcodeOutputFilename, llc, ErrMsg))
-        PrintAndExit(ErrMsg);
+        PrintAndExit(ErrMsg, Composite.get());
 
       if (GenerateNative(OutputFilename, CFile.str(), 
                          NativeLinkItems, gcc, envp, ErrMsg))
-        PrintAndExit(ErrMsg);
-
-      // Remove the assembly language file.
-      CFile.eraseFromDisk();
-
+        PrintAndExit(ErrMsg, Composite.get());
     } else {
-      EmitShellScript(argv);
+      EmitShellScript(argv, Composite.get());
     }
 
     // Make the script executable...
     std::string ErrMsg;
     if (sys::Path(OutputFilename).makeExecutableOnDisk(&ErrMsg))
-      PrintAndExit(ErrMsg);
+      PrintAndExit(ErrMsg, Composite.get());
 
     // Make the bitcode file readable and directly executable in LLEE as well
     if (sys::Path(BitcodeOutputFilename).makeExecutableOnDisk(&ErrMsg))
-      PrintAndExit(ErrMsg);
+      PrintAndExit(ErrMsg, Composite.get());
 
     if (sys::Path(BitcodeOutputFilename).makeReadableOnDisk(&ErrMsg))
-      PrintAndExit(ErrMsg);
+      PrintAndExit(ErrMsg, Composite.get());
   }
+
+  // Operations which may fail are now complete.
+  BitcodeOutputRemover.releaseFile();
+  if (!LinkAsLibrary)
+    OutputRemover.releaseFile();
 
   // Graceful exit
   return 0;

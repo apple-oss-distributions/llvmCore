@@ -13,8 +13,10 @@ tablegen(X86GenDAGISel.inc -gen-dag-isel)
 tablegen(X86GenFastISel.inc -gen-fast-isel)
 tablegen(X86GenCallingConv.inc -gen-callingconv)
 tablegen(X86GenSubtarget.inc -gen-subtarget)
+tablegen(X86GenEDInfo.inc -gen-enhanced-disassembly-info)
 
 set(sources
+  SSEDomainFix.cpp
   X86AsmBackend.cpp
   X86CodeEmitter.cpp
   X86COFFMachineModuleInfo.cpp
@@ -32,11 +34,17 @@ set(sources
   X86TargetMachine.cpp
   X86TargetObjectFile.cpp
   X86FastISel.cpp
+  X86SelectionDAGInfo.cpp
   )
 
 if( CMAKE_CL_64 )
   enable_language(ASM_MASM)
-  set(sources ${sources} X86CompilationCallback_Win64.asm)
+  ADD_CUSTOM_COMMAND(
+    OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/X86CompilationCallback_Win64.obj
+    COMMAND ${CMAKE_ASM_MASM_COMPILER} /Fo ${CMAKE_CURRENT_BINARY_DIR}/X86CompilationCallback_Win64.obj /c ${CMAKE_CURRENT_SOURCE_DIR}/X86CompilationCallback_Win64.asm
+    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/X86CompilationCallback_Win64.asm
+   )
+   set(sources ${sources} ${CMAKE_CURRENT_BINARY_DIR}/X86CompilationCallback_Win64.obj)
 endif()
 
 add_llvm_target(X86CodeGen ${sources})

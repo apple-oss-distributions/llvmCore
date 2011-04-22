@@ -820,7 +820,7 @@ OperandType RecognizableInstr::typeFromString(const std::string &s,
   TYPE("i128mem",             TYPE_M128)
   TYPE("i64i32imm_pcrel",     TYPE_REL64)
   TYPE("i32imm_pcrel",        TYPE_REL32)
-  TYPE("SSECC",               TYPE_IMM8)
+  TYPE("SSECC",               TYPE_IMM3)
   TYPE("brtarget",            TYPE_RELv)
   TYPE("brtarget8",           TYPE_REL8)
   TYPE("f80mem",              TYPE_M80FP)
@@ -835,8 +835,7 @@ OperandType RecognizableInstr::typeFromString(const std::string &s,
   TYPE("opaque512mem",        TYPE_M512)
   TYPE("SEGMENT_REG",         TYPE_SEGMENTREG)
   TYPE("DEBUG_REG",           TYPE_DEBUGREG)
-  TYPE("CONTROL_REG_32",      TYPE_CR32)
-  TYPE("CONTROL_REG_64",      TYPE_CR64)
+  TYPE("CONTROL_REG",         TYPE_CONTROLREG)
   TYPE("offset8",             TYPE_MOFFS8)
   TYPE("offset16",            TYPE_MOFFS16)
   TYPE("offset32",            TYPE_MOFFS32)
@@ -895,8 +894,7 @@ OperandEncoding RecognizableInstr::roRegisterEncodingFromString
   ENCODING("VR64",            ENCODING_REG)
   ENCODING("SEGMENT_REG",     ENCODING_REG)
   ENCODING("DEBUG_REG",       ENCODING_REG)
-  ENCODING("CONTROL_REG_32",  ENCODING_REG)
-  ENCODING("CONTROL_REG_64",  ENCODING_REG)
+  ENCODING("CONTROL_REG",     ENCODING_REG)
   errs() << "Unhandled reg/opcode register encoding " << s << "\n";
   llvm_unreachable("Unhandled reg/opcode register encoding");
 }

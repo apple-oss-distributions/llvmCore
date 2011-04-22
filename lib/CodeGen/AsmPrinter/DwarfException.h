@@ -14,30 +14,38 @@
 #ifndef LLVM_CODEGEN_ASMPRINTER_DWARFEXCEPTION_H
 #define LLVM_CODEGEN_ASMPRINTER_DWARFEXCEPTION_H
 
-#include "DIE.h"
-#include "DwarfPrinter.h"
-#include "llvm/CodeGen/AsmPrinter.h"
 #include "llvm/ADT/DenseMap.h"
-#include <string>
+#include <vector>
 
 namespace llvm {
 
+template <typename T> class SmallVectorImpl;
 struct LandingPadInfo;
 class MachineModuleInfo;
+class MachineMove;
+class MachineInstr;
+class MachineFunction;
 class MCAsmInfo;
 class MCExpr;
-class Timer;
-class raw_ostream;
+class MCSymbol;
+class Function;
+class AsmPrinter;
 
 //===----------------------------------------------------------------------===//
 /// DwarfException - Emits Dwarf exception handling directives.
 ///
-class DwarfException : public DwarfPrinter {
+class DwarfException {
+  /// Asm - Target of Dwarf emission.
+  AsmPrinter *Asm;
+
+  /// MMI - Collected machine module information.
+  MachineModuleInfo *MMI;
+
   struct FunctionEHFrameInfo {
     MCSymbol *FunctionEHSym;  // L_foo.eh
     unsigned Number;
     unsigned PersonalityIndex;
-    bool hasCalls;
+    bool adjustsStack;
     bool hasLandingPads;
     std::vector<MachineMove> Moves;
     const Function *function;
@@ -47,7 +55,7 @@ class DwarfException : public DwarfPrinter {
                         const std::vector<MachineMove> &M,
                         const Function *f):
       FunctionEHSym(EHSym), Number(Num), PersonalityIndex(P),
-      hasCalls(hC), hasLandingPads(hL), Moves(M), function (f) { }
+      adjustsStack(hC), hasLandingPads(hL), Moves(M), function (f) { }
   };
 
   std::vector<FunctionEHFrameInfo> EHFrames;
@@ -72,9 +80,6 @@ class DwarfException : public DwarfPrinter {
   /// shouldEmitFrameModule - Per-module flag to indicate if frame moves
   /// should be emitted.
   bool shouldEmitMovesModule;
-
-  /// ExceptionTimer - Timer for the Dwarf exception writer.
-  Timer *ExceptionTimer;
 
   /// EmitCIE - Emit a Common Information Entry (CIE). This holds information
   /// that is shared among many Frame Description Entries.  There is at least
@@ -166,15 +171,8 @@ public:
   //===--------------------------------------------------------------------===//
   // Main entry points.
   //
-  DwarfException(raw_ostream &OS, AsmPrinter *A, const MCAsmInfo *T);
-  virtual ~DwarfException();
-
-  /// BeginModule - Emit all exception information that should come prior to the
-  /// content.
-  void BeginModule(Module *m, MachineModuleInfo *mmi) {
-    this->M = m;
-    this->MMI = mmi;
-  }
+  DwarfException(AsmPrinter *A);
+  ~DwarfException();
 
   /// EndModule - Emit all exception information that should come after the
   /// content.

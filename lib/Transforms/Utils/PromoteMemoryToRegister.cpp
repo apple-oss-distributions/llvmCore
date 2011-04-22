@@ -68,7 +68,7 @@ bool llvm::isAllocaPromotable(const AllocaInst *AI) {
   // assignments to subsections of the memory unit.
 
   // Only allow direct and non-volatile loads and stores...
-  for (Value::use_const_iterator UI = AI->use_begin(), UE = AI->use_end();
+  for (Value::const_use_iterator UI = AI->use_begin(), UE = AI->use_end();
        UI != UE; ++UI)     // Loop over all of the uses of the alloca
     if (const LoadInst *LI = dyn_cast<LoadInst>(*UI)) {
       if (LI->isVolatile())
@@ -861,7 +861,7 @@ void PromoteMem2Reg::PromoteSingleBlockAlloca(AllocaInst *AI, AllocaInfo &Info,
     // Find the nearest store that has a lower than this load. 
     StoresByIndexTy::iterator I = 
       std::lower_bound(StoresByIndex.begin(), StoresByIndex.end(),
-                       std::pair<unsigned, StoreInst*>(LoadIdx, 0),
+                       std::pair<unsigned, StoreInst*>(LoadIdx, static_cast<StoreInst*>(0)),
                        StoreIndexSearchPredicate());
     
     // If there is no store before this load, then we can't promote this load.
@@ -886,7 +886,7 @@ void PromoteMem2Reg::PromoteSingleBlockAlloca(AllocaInst *AI, AllocaInfo &Info,
 void PromoteMem2Reg::ConvertDebugDeclareToDebugValue(DbgDeclareInst *DDI,
                                                      StoreInst *SI) {
   DIVariable DIVar(DDI->getVariable());
-  if (!DIVar.getNode())
+  if (!DIVar.Verify())
     return;
 
   if (!DIF)

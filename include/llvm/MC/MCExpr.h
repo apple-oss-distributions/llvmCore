@@ -134,7 +134,9 @@ public:
     VK_NTPOFF,
     VK_PLT,
     VK_TLSGD,
-    VK_TPOFF
+    VK_TPOFF,
+    VK_ARM_HI16, // The R_ARM_MOVT_ABS relocation (:upper16: in the asm file)
+    VK_ARM_LO16 // The R_ARM_MOVW_ABS_NC relocation (:lower16: in the asm file)
   };
 
 private:
@@ -160,11 +162,6 @@ public:
   static const MCSymbolRefExpr *Create(StringRef Name, VariantKind Kind,
                                        MCContext &Ctx);
   
-  /// CreateTemp - Create a reference to an assembler temporary label with the
-  /// specified name.
-  static const MCSymbolRefExpr *CreateTemp(StringRef Name, VariantKind Kind,
-                                           MCContext &Ctx);
-
   /// @}
   /// @name Accessors
   /// @{

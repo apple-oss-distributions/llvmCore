@@ -70,13 +70,16 @@ struct OperandsSignature {
     for (unsigned i = 0, e = InstPatNode->getNumChildren(); i != e; ++i) {
       TreePatternNode *Op = InstPatNode->getChild(i);
       // For now, filter out any operand with a predicate.
-      if (!Op->getPredicateFns().empty())
-        return false;
       // For now, filter out any operand with multiple values.
-      assert(Op->hasTypeSet() && "Type infererence not done?");
-      // For now, all the operands must have the same type.
-      if (Op->getType() != VT)
+      if (!Op->getPredicateFns().empty() ||
+          Op->getNumTypes() != 1)
         return false;
+      
+      assert(Op->hasTypeSet(0) && "Type infererence not done?");
+      // For now, all the operands must have the same type.
+      if (Op->getType(0) != VT)
+        return false;
+      
       if (!Op->isLeaf()) {
         if (Op->getOperator()->getName() == "imm") {
           Operands.push_back("i");
@@ -120,7 +123,7 @@ struct OperandsSignature {
   void PrintParameters(raw_ostream &OS) const {
     for (unsigned i = 0, e = Operands.size(); i != e; ++i) {
       if (Operands[i] == "r") {
-        OS << "unsigned Op" << i;
+        OS << "unsigned Op" << i << ", bool Op" << i << "IsKill";
       } else if (Operands[i] == "i") {
         OS << "uint64_t imm" << i;
       } else if (Operands[i] == "f") {
@@ -146,7 +149,7 @@ struct OperandsSignature {
       if (PrintedArg)
         OS << ", ";
       if (Operands[i] == "r") {
-        OS << "Op" << i;
+        OS << "Op" << i << ", Op" << i << "IsKill";
         PrintedArg = true;
       } else if (Operands[i] == "i") {
         OS << "imm" << i;
@@ -164,7 +167,7 @@ struct OperandsSignature {
   void PrintArguments(raw_ostream &OS) const {
     for (unsigned i = 0, e = Operands.size(); i != e; ++i) {
       if (Operands[i] == "r") {
-        OS << "Op" << i;
+        OS << "Op" << i << ", Op" << i << "IsKill";
       } else if (Operands[i] == "i") {
         OS << "imm" << i;
       } else if (Operands[i] == "f") {
@@ -254,7 +257,7 @@ void FastISelMap::CollectPatterns(CodeGenDAGPatterns &CGP) {
     Record *Op = Dst->getOperator();
     if (!Op->isSubClassOf("Instruction"))
       continue;
-    CodeGenInstruction &II = CGP.getTargetInfo().getInstruction(Op->getName());
+    CodeGenInstruction &II = CGP.getTargetInfo().getInstruction(Op);
     if (II.OperandList.empty())
       continue;
 
@@ -293,12 +296,18 @@ void FastISelMap::CollectPatterns(CodeGenDAGPatterns &CGP) {
     if (!InstPatNode) continue;
     if (InstPatNode->isLeaf()) continue;
 
+    // Ignore multiple result nodes for now.
+    if (InstPatNode->getNumTypes() > 1) continue;
+    
     Record *InstPatOp = InstPatNode->getOperator();
     std::string OpcodeName = getOpcodeName(InstPatOp, CGP);
-    MVT::SimpleValueType RetVT = InstPatNode->getType();
+    MVT::SimpleValueType RetVT = MVT::isVoid;
+    if (InstPatNode->getNumTypes()) RetVT = InstPatNode->getType(0);
     MVT::SimpleValueType VT = RetVT;
-    if (InstPatNode->getNumChildren())
-      VT = InstPatNode->getChild(0)->getType();
+    if (InstPatNode->getNumChildren()) {
+      assert(InstPatNode->getChild(0)->getNumTypes() == 1);
+      VT = InstPatNode->getChild(0)->getType(0);
+    }
 
     // For now, filter out instructions which just set a register to
     // an Operand or an immediate, like MOV32ri.
@@ -424,7 +433,7 @@ void FastISelMap::PrintFunctionDefinitions(raw_ostream &OS) {
                      << (*Memo.PhysRegs)[i] << ", Op" << i << ", "
                      << "TM.getRegisterInfo()->getPhysicalRegisterRegClass("
                      << (*Memo.PhysRegs)[i] << "), "
-                     << "MRI.getRegClass(Op" << i << "));\n";
+                     << "MRI.getRegClass(Op" << i << "), DL);\n";
               }
               
               OS << "  return FastEmitInst_";
@@ -438,7 +447,7 @@ void FastISelMap::PrintFunctionDefinitions(raw_ostream &OS) {
                 OS << ");\n";
               } else {
                 OS << "extractsubreg(" << getName(RetVT);
-                OS << ", Op0, ";
+                OS << ", Op0, Op0IsKill, ";
                 OS << (unsigned)Memo.SubRegNo;
                 OS << ");\n";
               }
@@ -518,7 +527,7 @@ void FastISelMap::PrintFunctionDefinitions(raw_ostream &OS) {
                      << (*Memo.PhysRegs)[i] << ", Op" << i << ", "
                      << "TM.getRegisterInfo()->getPhysicalRegisterRegClass("
                      << (*Memo.PhysRegs)[i] << "), "
-                     << "MRI.getRegClass(Op" << i << "));\n";
+                     << "MRI.getRegClass(Op" << i << "), DL);\n";
               }
             
             OS << "  return FastEmitInst_";
@@ -532,7 +541,7 @@ void FastISelMap::PrintFunctionDefinitions(raw_ostream &OS) {
               Operands.PrintArguments(OS, *Memo.PhysRegs);
               OS << ");\n";
             } else {
-              OS << "extractsubreg(RetVT, Op0, ";
+              OS << "extractsubreg(RetVT, Op0, Op0IsKill, ";
               OS << (unsigned)Memo.SubRegNo;
               OS << ");\n";
             }

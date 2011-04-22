@@ -15,7 +15,6 @@
 
 #include "llvm/LLVMContext.h"
 #include "llvm/Module.h"
-#include "llvm/ModuleProvider.h"
 #include "llvm/Type.h"
 #include "llvm/Bitcode/ReaderWriter.h"
 #include "llvm/CodeGen/LinkAllCodegenComponents.h"
@@ -126,28 +125,28 @@ int main(int argc, char **argv, char * const *envp) {
   
   // Load the bitcode...
   std::string ErrorMsg;
-  ModuleProvider *MP = NULL;
+  Module *Mod = NULL;
   if (MemoryBuffer *Buffer = MemoryBuffer::getFileOrSTDIN(InputFile,&ErrorMsg)){
-    MP = getBitcodeModuleProvider(Buffer, Context, &ErrorMsg);
-    if (!MP) delete Buffer;
+    Mod = getLazyBitcodeModule(Buffer, Context, &ErrorMsg);
+    if (!Mod) delete Buffer;
   }
   
-  if (!MP) {
+  if (!Mod) {
     errs() << argv[0] << ": error loading program '" << InputFile << "': "
            << ErrorMsg << "\n";
     exit(1);
   }
 
-  // Get the module as the MP could go away once EE takes over.
-  Module *Mod = NoLazyCompilation
-    ? MP->materializeModule(&ErrorMsg) : MP->getModule();
-  if (!Mod) {
-    errs() << argv[0] << ": bitcode didn't read correctly.\n";
-    errs() << "Reason: " << ErrorMsg << "\n";
-    exit(1);
+  // If not jitting lazily, load the whole bitcode file eagerly too.
+  if (NoLazyCompilation) {
+    if (Mod->MaterializeAllPermanently(&ErrorMsg)) {
+      errs() << argv[0] << ": bitcode didn't read correctly.\n";
+      errs() << "Reason: " << ErrorMsg << "\n";
+      exit(1);
+    }
   }
 
-  EngineBuilder builder(MP);
+  EngineBuilder builder(Mod);
   builder.setMArch(MArch);
   builder.setMCPU(MCPU);
   builder.setMAttrs(MAttrs);
@@ -193,7 +192,7 @@ int main(int argc, char **argv, char * const *envp) {
   } else {
     // Otherwise, if there is a .bc suffix on the executable strip it off, it
     // might confuse the program.
-    if (InputFile.rfind(".bc") == InputFile.length() - 3)
+    if (StringRef(InputFile).endswith(".bc"))
       InputFile.erase(InputFile.length() - 3);
   }
 

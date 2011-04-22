@@ -47,7 +47,7 @@ namespace {
     MachineVerifier(Pass *pass, bool allowDoubleDefs) :
       PASS(pass),
       allowVirtDoubleDefs(allowDoubleDefs),
-      allowPhysDoubleDefs(allowDoubleDefs),
+      allowPhysDoubleDefs(true),
       OutFileName(getenv("LLVM_VERIFY_MACHINEINSTRS"))
       {}
 
@@ -279,7 +279,7 @@ bool MachineVerifier::runOnMachineFunction(MachineFunction &MF) {
   if (OutFile)
     delete OutFile;
   else if (foundErrors)
-    llvm_report_error("Found "+Twine(foundErrors)+" machine code errors.");
+    report_fatal_error("Found "+Twine(foundErrors)+" machine code errors.");
 
   // Clean up.
   regsLive.clear();
@@ -351,8 +351,8 @@ void MachineVerifier::visitMachineFunctionBefore() {
 }
 
 // Does iterator point to a and b as the first two elements?
-bool matchPair(MachineBasicBlock::const_succ_iterator i,
-               const MachineBasicBlock *a, const MachineBasicBlock *b) {
+static bool matchPair(MachineBasicBlock::const_succ_iterator i,
+                      const MachineBasicBlock *a, const MachineBasicBlock *b) {
   if (*i == a)
     return *++i == b;
   if (*i == b)
@@ -470,7 +470,7 @@ MachineVerifier::visitMachineBasicBlockBefore(const MachineBasicBlock *MBB) {
   }
 
   regsLive.clear();
-  for (MachineBasicBlock::const_livein_iterator I = MBB->livein_begin(),
+  for (MachineBasicBlock::livein_iterator I = MBB->livein_begin(),
          E = MBB->livein_end(); I != E; ++I) {
     if (!TargetRegisterInfo::isPhysicalRegister(*I)) {
       report("MBB live-in list contains non-physical register", MBB);
@@ -552,19 +552,23 @@ MachineVerifier::visitMachineOperand(const MachineOperand *MO, unsigned MONum) {
       regsLiveInButUnused.erase(Reg);
 
       bool isKill = false;
-      if (MO->isKill()) {
-        isKill = true;
-        // Tied operands on two-address instuctions MUST NOT have a <kill> flag.
-        if (MI->isRegTiedToDefOperand(MONum))
+      unsigned defIdx;
+      if (MI->isRegTiedToDefOperand(MONum, &defIdx)) {
+        // A two-addr use counts as a kill if use and def are the same.
+        unsigned DefReg = MI->getOperand(defIdx).getReg();
+        if (Reg == DefReg) {
+          isKill = true;
+          // ANd in that case an explicit kill flag is not allowed.
+          if (MO->isKill())
             report("Illegal kill flag on two-address instruction operand",
                    MO, MONum);
-      } else {
-        // TwoAddress instr modifying a reg is treated as kill+def.
-        unsigned defIdx;
-        if (MI->isRegTiedToDefOperand(MONum, &defIdx) &&
-            MI->getOperand(defIdx).getReg() == Reg)
-          isKill = true;
-      }
+        } else if (TargetRegisterInfo::isPhysicalRegister(Reg)) {
+          report("Two-address instruction operands must be identical",
+                 MO, MONum);
+        }
+      } else
+        isKill = MO->isKill();
+
       if (isKill) {
         addRegWithSubRegs(regsKilled, Reg);
 
@@ -631,11 +635,14 @@ MachineVerifier::visitMachineOperand(const MachineOperand *MO, unsigned MONum) {
         // Virtual register.
         const TargetRegisterClass *RC = MRI->getRegClass(Reg);
         if (SubIdx) {
-          if (RC->subregclasses_begin()+SubIdx >= RC->subregclasses_end()) {
+          const TargetRegisterClass *SRC = RC->getSubRegisterRegClass(SubIdx);
+          if (!SRC) {
             report("Invalid subregister index for virtual register", MO, MONum);
+            *OS << "Register class " << RC->getName()
+                << " does not support subreg index " << SubIdx << "\n";
             return;
           }
-          RC = *(RC->subregclasses_begin()+SubIdx);
+          RC = SRC;
         }
         if (const TargetRegisterClass *DRC = TOI.getRegClass(TRI)) {
           if (RC != DRC && !RC->hasSuperClass(DRC)) {

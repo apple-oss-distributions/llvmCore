@@ -64,7 +64,7 @@ void RegScavenger::initRegState() {
     return;
 
   // Live-in registers are in use.
-  for (MachineBasicBlock::const_livein_iterator I = MBB->livein_begin(),
+  for (MachineBasicBlock::livein_iterator I = MBB->livein_begin(),
          E = MBB->livein_end(); I != E; ++I)
     setUsed(*I);
 
@@ -135,6 +135,9 @@ void RegScavenger::forward() {
     ScavengedRC = NULL;
     ScavengeRestore = NULL;
   }
+
+  if (MI->isDebugValue())
+    return;
 
   // Find out which registers are early clobbered, killed, defined, and marked
   // def-dead in this instruction.
@@ -340,12 +343,12 @@ unsigned RegScavenger::scavengeRegister(const TargetRegisterClass *RC,
     // Spill the scavenged register before I.
     assert(ScavengingFrameIndex >= 0 &&
            "Cannot scavenge register without an emergency spill slot!");
-    TII->storeRegToStackSlot(*MBB, I, SReg, true, ScavengingFrameIndex, RC);
+    TII->storeRegToStackSlot(*MBB, I, SReg, true, ScavengingFrameIndex, RC,TRI);
     MachineBasicBlock::iterator II = prior(I);
     TRI->eliminateFrameIndex(II, SPAdj, NULL, this);
 
     // Restore the scavenged register before its use (or first terminator).
-    TII->loadRegFromStackSlot(*MBB, UseMI, SReg, ScavengingFrameIndex, RC);
+    TII->loadRegFromStackSlot(*MBB, UseMI, SReg, ScavengingFrameIndex, RC, TRI);
     II = prior(UseMI);
     TRI->eliminateFrameIndex(II, SPAdj, NULL, this);
   }

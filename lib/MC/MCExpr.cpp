@@ -7,7 +7,9 @@
 //
 //===----------------------------------------------------------------------===//
 
+#define DEBUG_TYPE "mcexpr"
 #include "llvm/MC/MCExpr.h"
+#include "llvm/ADT/Statistic.h"
 #include "llvm/ADT/StringSwitch.h"
 #include "llvm/MC/MCAsmLayout.h"
 #include "llvm/MC/MCAssembler.h"
@@ -18,6 +20,12 @@
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Target/TargetAsmBackend.h"
 using namespace llvm;
+
+namespace {
+namespace stats {
+STATISTIC(MCExprEvaluate, "Number of MCExpr evaluations");
+}
+}
 
 void MCExpr::print(raw_ostream &OS) const {
   switch (getKind()) {
@@ -30,7 +38,11 @@ void MCExpr::print(raw_ostream &OS) const {
   case MCExpr::SymbolRef: {
     const MCSymbolRefExpr &SRE = cast<MCSymbolRefExpr>(*this);
     const MCSymbol &Sym = SRE.getSymbol();
-    
+
+    if (SRE.getKind() == MCSymbolRefExpr::VK_ARM_HI16 ||
+	SRE.getKind() == MCSymbolRefExpr::VK_ARM_LO16)
+      OS << MCSymbolRefExpr::getVariantKindName(SRE.getKind());
+
     // Parenthesize names that start with $ so that they don't look like
     // absolute names.
     if (Sym.getName()[0] == '$')
@@ -38,7 +50,9 @@ void MCExpr::print(raw_ostream &OS) const {
     else
       OS << Sym;
 
-    if (SRE.getKind() != MCSymbolRefExpr::VK_None)
+    if (SRE.getKind() != MCSymbolRefExpr::VK_None &&
+	SRE.getKind() != MCSymbolRefExpr::VK_ARM_HI16 &&
+	SRE.getKind() != MCSymbolRefExpr::VK_ARM_LO16)
       OS << '@' << MCSymbolRefExpr::getVariantKindName(SRE.getKind());
 
     return;
@@ -59,14 +73,14 @@ void MCExpr::print(raw_ostream &OS) const {
 
   case MCExpr::Binary: {
     const MCBinaryExpr &BE = cast<MCBinaryExpr>(*this);
-    
+
     // Only print parens around the LHS if it is non-trivial.
     if (isa<MCConstantExpr>(BE.getLHS()) || isa<MCSymbolRefExpr>(BE.getLHS())) {
       OS << *BE.getLHS();
     } else {
       OS << '(' << *BE.getLHS() << ')';
     }
-    
+
     switch (BE.getOpcode()) {
     default: assert(0 && "Invalid opcode!");
     case MCBinaryExpr::Add:
@@ -77,7 +91,7 @@ void MCExpr::print(raw_ostream &OS) const {
           return;
         }
       }
-        
+
       OS <<  '+';
       break;
     case MCBinaryExpr::And:  OS <<  '&'; break;
@@ -98,7 +112,7 @@ void MCExpr::print(raw_ostream &OS) const {
     case MCBinaryExpr::Sub:  OS <<  '-'; break;
     case MCBinaryExpr::Xor:  OS <<  '^'; break;
     }
-    
+
     // Only print parens around the LHS if it is non-trivial.
     if (isa<MCConstantExpr>(BE.getRHS()) || isa<MCSymbolRefExpr>(BE.getRHS())) {
       OS << *BE.getRHS();
@@ -146,12 +160,6 @@ const MCSymbolRefExpr *MCSymbolRefExpr::Create(StringRef Name, VariantKind Kind,
   return Create(Ctx.GetOrCreateSymbol(Name), Kind, Ctx);
 }
 
-const MCSymbolRefExpr *MCSymbolRefExpr::CreateTemp(StringRef Name,
-                                                   VariantKind Kind,
-                                                   MCContext &Ctx) {
-  return Create(Ctx.GetOrCreateTemporarySymbol(Name), Kind, Ctx);
-}
-
 StringRef MCSymbolRefExpr::getVariantKindName(VariantKind Kind) {
   switch (Kind) {
   default:
@@ -167,6 +175,8 @@ StringRef MCSymbolRefExpr::getVariantKindName(VariantKind Kind) {
   case VK_PLT: return "PLT";
   case VK_TLSGD: return "TLSGD";
   case VK_TPOFF: return "TPOFF";
+  case VK_ARM_HI16: return ":upper16:";
+  case VK_ARM_LO16: return ":lower16:";
   }
 }
 
@@ -193,7 +203,13 @@ void MCTargetExpr::Anchor() {}
 
 bool MCExpr::EvaluateAsAbsolute(int64_t &Res, const MCAsmLayout *Layout) const {
   MCValue Value;
-  
+
+  // Fast path constants.
+  if (const MCConstantExpr *CE = dyn_cast<MCConstantExpr>(this)) {
+    Res = CE->getValue();
+    return true;
+  }
+
   if (!EvaluateAsRelocatable(Value, Layout) || !Value.isAbsolute())
     return false;
 
@@ -201,16 +217,16 @@ bool MCExpr::EvaluateAsAbsolute(int64_t &Res, const MCAsmLayout *Layout) const {
   return true;
 }
 
-static bool EvaluateSymbolicAdd(const MCValue &LHS, const MCSymbol *RHS_A, 
-                                const MCSymbol *RHS_B, int64_t RHS_Cst,
+static bool EvaluateSymbolicAdd(const MCValue &LHS,const MCSymbolRefExpr *RHS_A,
+                                const MCSymbolRefExpr *RHS_B, int64_t RHS_Cst,
                                 MCValue &Res) {
   // We can't add or subtract two symbols.
   if ((LHS.getSymA() && RHS_A) ||
       (LHS.getSymB() && RHS_B))
     return false;
 
-  const MCSymbol *A = LHS.getSymA() ? LHS.getSymA() : RHS_A;
-  const MCSymbol *B = LHS.getSymB() ? LHS.getSymB() : RHS_B;
+  const MCSymbolRefExpr *A = LHS.getSymA() ? LHS.getSymA() : RHS_A;
+  const MCSymbolRefExpr *B = LHS.getSymB() ? LHS.getSymB() : RHS_B;
   if (B) {
     // If we have a negated symbol, then we must have also have a non-negated
     // symbol in order to encode the expression. We can do this check later to
@@ -225,38 +241,44 @@ static bool EvaluateSymbolicAdd(const MCValue &LHS, const MCSymbol *RHS_A,
 
 bool MCExpr::EvaluateAsRelocatable(MCValue &Res,
                                    const MCAsmLayout *Layout) const {
+  ++stats::MCExprEvaluate;
+
   switch (getKind()) {
   case Target:
     return cast<MCTargetExpr>(this)->EvaluateAsRelocatableImpl(Res, Layout);
-      
+
   case Constant:
     Res = MCValue::get(cast<MCConstantExpr>(this)->getValue());
     return true;
 
   case SymbolRef: {
-    const MCSymbol &Sym = cast<MCSymbolRefExpr>(this)->getSymbol();
+    const MCSymbolRefExpr *SRE = cast<MCSymbolRefExpr>(this);
+    const MCSymbol &Sym = SRE->getSymbol();
 
     // Evaluate recursively if this is a variable.
     if (Sym.isVariable()) {
-      if (!Sym.getValue()->EvaluateAsRelocatable(Res, Layout))
+      if (!Sym.getVariableValue()->EvaluateAsRelocatable(Res, Layout))
         return false;
 
       // Absolutize symbol differences between defined symbols when we have a
       // layout object and the target requests it.
       if (Layout && Res.getSymB() &&
           Layout->getAssembler().getBackend().hasAbsolutizedSet() &&
-          Res.getSymA()->isDefined() && Res.getSymB()->isDefined()) {
-        MCSymbolData &A = Layout->getAssembler().getSymbolData(*Res.getSymA());
-        MCSymbolData &B = Layout->getAssembler().getSymbolData(*Res.getSymB());
-        Res = MCValue::get(+ A.getFragment()->getAddress() + A.getOffset()
-                           - B.getFragment()->getAddress() - B.getOffset()
+          Res.getSymA()->getSymbol().isDefined() &&
+          Res.getSymB()->getSymbol().isDefined()) {
+        MCSymbolData &A =
+          Layout->getAssembler().getSymbolData(Res.getSymA()->getSymbol());
+        MCSymbolData &B =
+          Layout->getAssembler().getSymbolData(Res.getSymB()->getSymbol());
+        Res = MCValue::get(+ Layout->getSymbolAddress(&A)
+                           - Layout->getSymbolAddress(&B)
                            + Res.getConstant());
       }
 
       return true;
     }
 
-    Res = MCValue::get(&Sym, 0, 0);
+    Res = MCValue::get(SRE, 0, 0);
     return true;
   }
 
@@ -277,13 +299,13 @@ bool MCExpr::EvaluateAsRelocatable(MCValue &Res,
       /// -(a - b + const) ==> (b - a - const)
       if (Value.getSymA() && !Value.getSymB())
         return false;
-      Res = MCValue::get(Value.getSymB(), Value.getSymA(), 
-                         -Value.getConstant()); 
+      Res = MCValue::get(Value.getSymB(), Value.getSymA(),
+                         -Value.getConstant());
       break;
     case MCUnaryExpr::Not:
       if (!Value.isAbsolute())
         return false;
-      Res = MCValue::get(~Value.getConstant()); 
+      Res = MCValue::get(~Value.getConstant());
       break;
     case MCUnaryExpr::Plus:
       Res = Value;
@@ -296,7 +318,7 @@ bool MCExpr::EvaluateAsRelocatable(MCValue &Res,
   case Binary: {
     const MCBinaryExpr *ABE = cast<MCBinaryExpr>(this);
     MCValue LHSValue, RHSValue;
-    
+
     if (!ABE->getLHS()->EvaluateAsRelocatable(LHSValue, Layout) ||
         !ABE->getRHS()->EvaluateAsRelocatable(RHSValue, Layout))
       return false;

@@ -241,6 +241,8 @@ extern const PassInfo *const LowerSwitchID;
 // lowering pass.
 //
 FunctionPass *createLowerInvokePass(const TargetLowering *TLI = 0);
+FunctionPass *createLowerInvokePass(const TargetLowering *TLI,
+                                    bool useExpensiveEHSupport);
 extern const PassInfo *const LowerInvokePassID;
 
 //===----------------------------------------------------------------------===//
@@ -326,15 +328,15 @@ FunctionPass *createGEPSplitterPass();
 
 //===----------------------------------------------------------------------===//
 //
-// SCCVN - Aggressively eliminate redundant scalar values
-//
-FunctionPass *createSCCVNPass();
-
-//===----------------------------------------------------------------------===//
-//
 // ABCD - Elimination of Array Bounds Checks on Demand
 //
 FunctionPass *createABCDPass();
+
+//===----------------------------------------------------------------------===//
+//
+// Sink - Code Sinking
+//
+FunctionPass *createSinkingPass();
 
 } // End llvm namespace
 

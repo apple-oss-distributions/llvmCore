@@ -22,11 +22,12 @@
 #include "llvm/ADT/Twine.h"
 using namespace llvm;
 
-static bool isAcceptableChar(char C) {
+static bool isAcceptableChar(char C, bool AllowPeriod) {
   if ((C < 'a' || C > 'z') &&
       (C < 'A' || C > 'Z') &&
       (C < '0' || C > '9') &&
-      C != '_' && C != '$' && C != '.' && C != '@')
+      C != '_' && C != '$' && C != '@' &&
+      !(AllowPeriod && C == '.'))
     return false;
   return true;
 }
@@ -54,8 +55,9 @@ static bool NameNeedsEscaping(StringRef Str, const MCAsmInfo &MAI) {
   
   // If any of the characters in the string is an unacceptable character, force
   // quotes.
+  bool AllowPeriod = MAI.doesAllowPeriodsInName();
   for (unsigned i = 0, e = Str.size(); i != e; ++i)
-    if (!isAcceptableChar(Str[i]))
+    if (!isAcceptableChar(Str[i], AllowPeriod))
       return true;
   return false;
 }
@@ -70,9 +72,10 @@ static void appendMangledName(SmallVectorImpl<char> &OutName, StringRef Str,
     MangleLetter(OutName, Str[0]);
     Str = Str.substr(1);
   }
-  
+
+  bool AllowPeriod = MAI.doesAllowPeriodsInName();
   for (unsigned i = 0, e = Str.size(); i != e; ++i) {
-    if (!isAcceptableChar(Str[i]))
+    if (!isAcceptableChar(Str[i], AllowPeriod))
       MangleLetter(OutName, Str[i]);
     else
       OutName.push_back(Str[i]);
@@ -235,10 +238,7 @@ std::string Mangler::getNameWithPrefix(const GlobalValue *GV,
 MCSymbol *Mangler::getSymbol(const GlobalValue *GV) {
   SmallString<60> NameStr;
   getNameWithPrefix(NameStr, GV, false);
-  if (!GV->hasPrivateLinkage())
-    return Context.GetOrCreateSymbol(NameStr.str());
-  
-  return Context.GetOrCreateTemporarySymbol(NameStr.str());
+  return Context.GetOrCreateSymbol(NameStr.str());
 }
 
 

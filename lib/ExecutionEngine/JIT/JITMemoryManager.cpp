@@ -15,6 +15,7 @@
 #include "llvm/ExecutionEngine/JITMemoryManager.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/Statistic.h"
+#include "llvm/ADT/Twine.h"
 #include "llvm/GlobalValue.h"
 #include "llvm/Support/Allocator.h"
 #include "llvm/Support/Compiler.h"
@@ -22,12 +23,9 @@
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/System/Memory.h"
-#include <map>
 #include <vector>
 #include <cassert>
 #include <climits>
-#include <cstdio>
-#include <cstdlib>
 #include <cstring>
 using namespace llvm;
 
@@ -296,7 +294,6 @@ namespace {
     MemoryRangeHeader *CurBlock;
 
     uint8_t *GOTBase;     // Target Specific reserved memory
-    void *DlsymTable;     // Stub external symbol information
   public:
     DefaultJITMemoryManager();
     ~DefaultJITMemoryManager();
@@ -318,7 +315,6 @@ namespace {
     static const size_t DefaultSizeThreshold;
 
     void AllocateGOT();
-    void SetDlsymTable(void *);
 
     // Testing methods.
     virtual bool CheckInvariants(std::string &ErrorStr);
@@ -469,10 +465,6 @@ namespace {
       return GOTBase;
     }
 
-    void *getDlsymTable() const {
-      return DlsymTable;
-    }
-
     void deallocateBlock(void *Block) {
       // Find the block that is allocated for this function.
       MemoryRangeHeader *MemRange = static_cast<MemoryRangeHeader*>(Block) - 1;
@@ -599,17 +591,12 @@ DefaultJITMemoryManager::DefaultJITMemoryManager()
   FreeMemoryList = Mem0;
 
   GOTBase = NULL;
-  DlsymTable = NULL;
 }
 
 void DefaultJITMemoryManager::AllocateGOT() {
   assert(GOTBase == 0 && "Cannot allocate the got multiple times");
   GOTBase = new uint8_t[sizeof(void*) * 8192];
   HasGOT = true;
-}
-
-void DefaultJITMemoryManager::SetDlsymTable(void *ptr) {
-  DlsymTable = ptr;
 }
 
 DefaultJITMemoryManager::~DefaultJITMemoryManager() {
@@ -625,8 +612,8 @@ sys::MemoryBlock DefaultJITMemoryManager::allocateNewSlab(size_t size) {
   sys::MemoryBlock *LastSlabPtr = LastSlab.base() ? &LastSlab : 0;
   sys::MemoryBlock B = sys::Memory::AllocateRWX(size, LastSlabPtr, &ErrMsg);
   if (B.base() == 0) {
-    llvm_report_error("Allocation failed when allocating new memory in the"
-                      " JIT\n" + ErrMsg);
+    report_fatal_error("Allocation failed when allocating new memory in the"
+                       " JIT\n" + Twine(ErrMsg));
   }
   LastSlab = B;
   ++NumSlabs;

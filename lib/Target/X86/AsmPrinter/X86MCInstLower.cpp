@@ -83,7 +83,7 @@ GetSymbolFromOperand(const MachineOperand &MO) const {
   case X86II::MO_DARWIN_NONLAZY:
   case X86II::MO_DARWIN_NONLAZY_PIC_BASE: {
     Name += "$non_lazy_ptr";
-    MCSymbol *Sym = Ctx.GetOrCreateTemporarySymbol(Name.str());
+    MCSymbol *Sym = Ctx.GetOrCreateSymbol(Name.str());
 
     MachineModuleInfoImpl::StubValueTy &StubSym =
       getMachOMMI().getGVStubEntry(Sym);
@@ -98,7 +98,7 @@ GetSymbolFromOperand(const MachineOperand &MO) const {
   }
   case X86II::MO_DARWIN_HIDDEN_NONLAZY_PIC_BASE: {
     Name += "$non_lazy_ptr";
-    MCSymbol *Sym = Ctx.GetOrCreateTemporarySymbol(Name.str());
+    MCSymbol *Sym = Ctx.GetOrCreateSymbol(Name.str());
     MachineModuleInfoImpl::StubValueTy &StubSym =
       getMachOMMI().getHiddenGVStubEntry(Sym);
     if (StubSym.getPointer() == 0) {
@@ -112,7 +112,7 @@ GetSymbolFromOperand(const MachineOperand &MO) const {
   }
   case X86II::MO_DARWIN_STUB: {
     Name += "$stub";
-    MCSymbol *Sym = Ctx.GetOrCreateTemporarySymbol(Name.str());
+    MCSymbol *Sym = Ctx.GetOrCreateSymbol(Name.str());
     MachineModuleInfoImpl::StubValueTy &StubSym =
       getMachOMMI().getFnStubEntry(Sym);
     if (StubSym.getPointer())
@@ -127,7 +127,7 @@ GetSymbolFromOperand(const MachineOperand &MO) const {
       Name.erase(Name.end()-5, Name.end());
       StubSym =
         MachineModuleInfoImpl::
-        StubValueTy(Ctx.GetOrCreateTemporarySymbol(Name.str()), false);
+        StubValueTy(Ctx.GetOrCreateSymbol(Name.str()), false);
     }
     return Sym;
   }
@@ -169,6 +169,15 @@ MCOperand X86MCInstLower::LowerSymbolOperand(const MachineOperand &MO,
     Expr = MCBinaryExpr::CreateSub(Expr, 
                                MCSymbolRefExpr::Create(GetPICBaseSymbol(), Ctx),
                                    Ctx);
+    if (MO.isJTI() && AsmPrinter.MAI->hasSetDirective()) {
+      // If .set directive is supported, use it to reduce the number of
+      // relocations the assembler will generate for differences between
+      // local labels. This is only safe when the symbols are in the same
+      // section so we are restricting it to jumptable references.
+      MCSymbol *Label = Ctx.CreateTempSymbol();
+      AsmPrinter.OutStreamer.EmitAssignment(Label, Expr);
+      Expr = MCSymbolRefExpr::Create(Label, Ctx);
+    }
     break;
   }
   
@@ -215,6 +224,26 @@ static void LowerUnaryToTwoAddr(MCInst &OutMI, unsigned NewOpc) {
   OutMI.addOperand(OutMI.getOperand(0));
 }
 
+/// \brief Simplify FOO $imm, %{al,ax,eax,rax} to FOO $imm, for instruction with
+/// a short fixed-register form.
+static void SimplifyShortImmForm(MCInst &Inst, unsigned Opcode) {
+  unsigned ImmOp = Inst.getNumOperands() - 1;
+  assert(Inst.getOperand(0).isReg() && Inst.getOperand(ImmOp).isImm() &&
+         ((Inst.getNumOperands() == 3 && Inst.getOperand(1).isReg() &&
+           Inst.getOperand(0).getReg() == Inst.getOperand(1).getReg()) ||
+          Inst.getNumOperands() == 2) && "Unexpected instruction!");
+
+  // Check whether the destination register can be fixed.
+  unsigned Reg = Inst.getOperand(0).getReg();
+  if (Reg != X86::AL && Reg != X86::AX && Reg != X86::EAX && Reg != X86::RAX)
+    return;
+
+  // If so, rewrite the instruction.
+  MCInst New;
+  New.setOpcode(Opcode);
+  New.addOperand(Inst.getOperand(ImmOp));
+  Inst = New;
+}
 
 void X86MCInstLower::Lower(const MachineInstr *MI, MCInst &OutMI) const {
   OutMI.setOpcode(MI->getOpcode());
@@ -287,7 +316,9 @@ void X86MCInstLower::Lower(const MachineInstr *MI, MCInst &OutMI) const {
     LowerUnaryToTwoAddr(OutMI, X86::MMX_PCMPEQDrr); break;
   case X86::FsFLD0SS:     LowerUnaryToTwoAddr(OutMI, X86::PXORrr); break;
   case X86::FsFLD0SD:     LowerUnaryToTwoAddr(OutMI, X86::PXORrr); break;
-  case X86::V_SET0:       LowerUnaryToTwoAddr(OutMI, X86::XORPSrr); break;
+  case X86::V_SET0PS:     LowerUnaryToTwoAddr(OutMI, X86::XORPSrr); break;
+  case X86::V_SET0PD:     LowerUnaryToTwoAddr(OutMI, X86::XORPDrr); break;
+  case X86::V_SET0PI:     LowerUnaryToTwoAddr(OutMI, X86::PXORrr); break;
   case X86::V_SETALLONES: LowerUnaryToTwoAddr(OutMI, X86::PCMPEQDrr); break;
 
   case X86::MOV16r0:
@@ -298,7 +329,17 @@ void X86MCInstLower::Lower(const MachineInstr *MI, MCInst &OutMI) const {
     LowerSubReg32_Op0(OutMI, X86::MOV32r0);   // MOV64r0 -> MOV32r0
     LowerUnaryToTwoAddr(OutMI, X86::XOR32rr); // MOV32r0 -> XOR32rr
     break;
-      
+    
+  // CALL64pcrel32 - This instruction has register inputs modeled as normal
+  // uses instead of implicit uses.  As such, truncate off all but the first
+  // operand (the callee).  FIXME: Change isel.
+  case X86::CALL64pcrel32: {
+    MCOperand Saved = OutMI.getOperand(0);
+    OutMI = MCInst();
+    OutMI.setOpcode(X86::CALL64pcrel32);
+    OutMI.addOperand(Saved);
+    break;
+  }
       
   // The assembler backend wants to see branches in their small form and relax
   // them to their large form.  The JIT can only handle the large form because
@@ -321,73 +362,102 @@ void X86MCInstLower::Lower(const MachineInstr *MI, MCInst &OutMI) const {
   case X86::JGE_4: OutMI.setOpcode(X86::JGE_1); break;
   case X86::JLE_4: OutMI.setOpcode(X86::JLE_1); break;
   case X86::JG_4:  OutMI.setOpcode(X86::JG_1); break;
+
+  // We don't currently select the correct instruction form for instructions
+  // which have a short %eax, etc. form. Handle this by custom lowering, for
+  // now.
+  //
+  // Note, we are currently not handling the following instructions:
+  // MOV8ao8, MOV8o8a
+  // MOV16ao16, MOV16o16a
+  // MOV32ao32, MOV32o32a
+  // MOV64ao64, MOV64ao8
+  // MOV64o64a, MOV64o8a
+  // XCHG16ar, XCHG32ar, XCHG64ar
+  case X86::ADC8ri:     SimplifyShortImmForm(OutMI, X86::ADC8i8);    break;
+  case X86::ADC16ri:    SimplifyShortImmForm(OutMI, X86::ADC16i16);  break;
+  case X86::ADC32ri:    SimplifyShortImmForm(OutMI, X86::ADC32i32);  break;
+  case X86::ADC64ri32:  SimplifyShortImmForm(OutMI, X86::ADC64i32);  break;
+  case X86::ADD8ri:     SimplifyShortImmForm(OutMI, X86::ADD8i8);    break;
+  case X86::ADD16ri:    SimplifyShortImmForm(OutMI, X86::ADD16i16);  break;
+  case X86::ADD32ri:    SimplifyShortImmForm(OutMI, X86::ADD32i32);  break;
+  case X86::ADD64ri32:  SimplifyShortImmForm(OutMI, X86::ADD64i32);  break;
+  case X86::AND8ri:     SimplifyShortImmForm(OutMI, X86::AND8i8);    break;
+  case X86::AND16ri:    SimplifyShortImmForm(OutMI, X86::AND16i16);  break;
+  case X86::AND32ri:    SimplifyShortImmForm(OutMI, X86::AND32i32);  break;
+  case X86::AND64ri32:  SimplifyShortImmForm(OutMI, X86::AND64i32);  break;
+  case X86::CMP8ri:     SimplifyShortImmForm(OutMI, X86::CMP8i8);    break;
+  case X86::CMP16ri:    SimplifyShortImmForm(OutMI, X86::CMP16i16);  break;
+  case X86::CMP32ri:    SimplifyShortImmForm(OutMI, X86::CMP32i32);  break;
+  case X86::CMP64ri32:  SimplifyShortImmForm(OutMI, X86::CMP64i32);  break;
+  case X86::OR8ri:      SimplifyShortImmForm(OutMI, X86::OR8i8);     break;
+  case X86::OR16ri:     SimplifyShortImmForm(OutMI, X86::OR16i16);   break;
+  case X86::OR32ri:     SimplifyShortImmForm(OutMI, X86::OR32i32);   break;
+  case X86::OR64ri32:   SimplifyShortImmForm(OutMI, X86::OR64i32);   break;
+  case X86::SBB8ri:     SimplifyShortImmForm(OutMI, X86::SBB8i8);    break;
+  case X86::SBB16ri:    SimplifyShortImmForm(OutMI, X86::SBB16i16);  break;
+  case X86::SBB32ri:    SimplifyShortImmForm(OutMI, X86::SBB32i32);  break;
+  case X86::SBB64ri32:  SimplifyShortImmForm(OutMI, X86::SBB64i32);  break;
+  case X86::SUB8ri:     SimplifyShortImmForm(OutMI, X86::SUB8i8);    break;
+  case X86::SUB16ri:    SimplifyShortImmForm(OutMI, X86::SUB16i16);  break;
+  case X86::SUB32ri:    SimplifyShortImmForm(OutMI, X86::SUB32i32);  break;
+  case X86::SUB64ri32:  SimplifyShortImmForm(OutMI, X86::SUB64i32);  break;
+  case X86::TEST8ri:    SimplifyShortImmForm(OutMI, X86::TEST8i8);   break;
+  case X86::TEST16ri:   SimplifyShortImmForm(OutMI, X86::TEST16i16); break;
+  case X86::TEST32ri:   SimplifyShortImmForm(OutMI, X86::TEST32i32); break;
+  case X86::TEST64ri32: SimplifyShortImmForm(OutMI, X86::TEST64i32); break;
+  case X86::XOR8ri:     SimplifyShortImmForm(OutMI, X86::XOR8i8);    break;
+  case X86::XOR16ri:    SimplifyShortImmForm(OutMI, X86::XOR16i16);  break;
+  case X86::XOR32ri:    SimplifyShortImmForm(OutMI, X86::XOR32i32);  break;
+  case X86::XOR64ri32:  SimplifyShortImmForm(OutMI, X86::XOR64i32);  break;
   }
 }
 
+void X86AsmPrinter::PrintDebugValueComment(const MachineInstr *MI,
+                                           raw_ostream &O) {
+  // Only the target-dependent form of DBG_VALUE should get here.
+  // Referencing the offset and metadata as NOps-2 and NOps-1 is
+  // probably portable to other targets; frame pointer location is not.
+  unsigned NOps = MI->getNumOperands();
+  assert(NOps==7);
+  O << '\t' << MAI->getCommentString() << "DEBUG_VALUE: ";
+  // cast away const; DIetc do not take const operands for some reason.
+  DIVariable V(const_cast<MDNode *>(MI->getOperand(NOps-1).getMetadata()));
+  if (V.getContext().isSubprogram())
+    O << DISubprogram(V.getContext()).getDisplayName() << ":";
+  O << V.getName();
+  O << " <- ";
+  // Frame address.  Currently handles register +- offset only.
+  assert(MI->getOperand(0).isReg() && MI->getOperand(3).isImm());
+  O << '['; printOperand(MI, 0, O); O << '+'; printOperand(MI, 3, O);
+  O << ']';
+  O << "+";
+  printOperand(MI, NOps-2, O);
+}
+
+MachineLocation 
+X86AsmPrinter::getDebugValueLocation(const MachineInstr *MI) const {
+  MachineLocation Location;
+  assert (MI->getNumOperands() == 7 && "Invalid no. of machine operands!");
+  // Frame address.  Currently handles register +- offset only.
+  assert(MI->getOperand(0).isReg() && MI->getOperand(3).isImm());
+  Location.set(MI->getOperand(0).getReg(), MI->getOperand(3).getImm());
+  return Location;
+}
 
 
 void X86AsmPrinter::EmitInstruction(const MachineInstr *MI) {
   X86MCInstLower MCInstLowering(OutContext, Mang, *this);
   switch (MI->getOpcode()) {
-  case TargetOpcode::DBG_VALUE: {
-    // FIXME: if this is implemented for another target before it goes
-    // away completely, the common part should be moved into AsmPrinter.
-    if (!VerboseAsm)
-      return;
-    O << '\t' << MAI->getCommentString() << "DEBUG_VALUE: ";
-    unsigned NOps = MI->getNumOperands();
-    // cast away const; DIetc do not take const operands for some reason.
-    DIVariable V((MDNode*)(MI->getOperand(NOps-1).getMetadata()));
-    O << V.getName();
-    O << " <- ";
-    if (NOps==3) {
-      // Register or immediate value. Register 0 means undef.
-      assert(MI->getOperand(0).getType()==MachineOperand::MO_Register ||
-             MI->getOperand(0).getType()==MachineOperand::MO_Immediate ||
-             MI->getOperand(0).getType()==MachineOperand::MO_FPImmediate);
-      if (MI->getOperand(0).getType()==MachineOperand::MO_Register &&
-          MI->getOperand(0).getReg()==0) {
-        // Suppress offset in this case, it is not meaningful.
-        O << "undef";
-        OutStreamer.AddBlankLine();
-        return;
-      } else if (MI->getOperand(0).getType()==MachineOperand::MO_FPImmediate) {
-        // This is more naturally done in printOperand, but since the only use
-        // of such an operand is in this comment and that is temporary (and it's
-        // ugly), we prefer to keep this localized.
-        // The include of Type.h may be removable when this code is.
-        if (MI->getOperand(0).getFPImm()->getType()->isFloatTy() ||
-            MI->getOperand(0).getFPImm()->getType()->isDoubleTy())
-          MI->getOperand(0).print(O, &TM);
-        else {
-          // There is no good way to print long double.  Convert a copy to
-          // double.  Ah well, it's only a comment.
-          bool ignored;
-          APFloat APF = APFloat(MI->getOperand(0).getFPImm()->getValueAPF());
-          APF.convert(APFloat::IEEEdouble, APFloat::rmNearestTiesToEven,
-                      &ignored);
-          O << "(long double) " << APF.convertToDouble();
-        }
-      } else
-        printOperand(MI, 0);
-    } else {
-      if (MI->getOperand(0).getType()==MachineOperand::MO_Register &&
-          MI->getOperand(0).getReg()==0) {
-        // Suppress offset in this case, it is not meaningful.
-        O << "undef";
-        OutStreamer.AddBlankLine();
-        return;
-      }
-      // Frame address.  Currently handles register +- offset only.
-      assert(MI->getOperand(0).getType()==MachineOperand::MO_Register);
-      assert(MI->getOperand(3).getType()==MachineOperand::MO_Immediate);
-      O << '['; printOperand(MI, 0); O << '+'; printOperand(MI, 3); O << ']';
+  case TargetOpcode::DBG_VALUE:
+    if (isVerbose() && OutStreamer.hasRawTextSupport()) {
+      std::string TmpStr;
+      raw_string_ostream OS(TmpStr);
+      PrintDebugValueComment(MI, OS);
+      OutStreamer.EmitRawText(StringRef(OS.str()));
     }
-    O << "+";
-    printOperand(MI, NOps-2);
-    OutStreamer.AddBlankLine();
     return;
-  }
+
   case X86::MOVPC32r: {
     MCInst TmpInst;
     // This is a pseudo op for a two instruction sequence with a label, which
@@ -427,7 +497,7 @@ void X86AsmPrinter::EmitInstruction(const MachineInstr *MI) {
     //   MYGLOBAL + (. - PICBASE)
     // However, we can't generate a ".", so just emit a new label here and refer
     // to it.
-    MCSymbol *DotSym = OutContext.GetOrCreateTemporarySymbol();
+    MCSymbol *DotSym = OutContext.CreateTempSymbol();
     OutStreamer.EmitLabel(DotSym);
     
     // Now that we have emitted the label, lower the complex operand expression.

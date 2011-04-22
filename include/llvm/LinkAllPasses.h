@@ -23,6 +23,7 @@
 #include "llvm/Analysis/PointerTracking.h"
 #include "llvm/Analysis/PostDominators.h"
 #include "llvm/Analysis/ScalarEvolution.h"
+#include "llvm/Analysis/Lint.h"
 #include "llvm/Assembly/PrintModulePass.h"
 #include "llvm/CodeGen/Passes.h"
 #include "llvm/Function.h"
@@ -131,12 +132,14 @@ namespace {
       (void) llvm::createPrintModulePass(0);
       (void) llvm::createPrintFunctionPass("", 0);
       (void) llvm::createDbgInfoPrinterPass();
+      (void) llvm::createModuleDebugInfoPrinterPass();
       (void) llvm::createPartialInliningPass();
       (void) llvm::createSSIPass();
       (void) llvm::createSSIEverythingPass();
       (void) llvm::createGEPSplitterPass();
-      (void) llvm::createSCCVNPass();
       (void) llvm::createABCDPass();
+      (void) llvm::createLintPass();
+      (void) llvm::createSinkingPass();
 
       (void)new llvm::IntervalPartition();
       (void)new llvm::FindUsedTypes();

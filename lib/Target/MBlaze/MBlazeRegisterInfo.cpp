@@ -220,7 +220,7 @@ void MBlazeRegisterInfo::adjustMBlazeStackFrame(MachineFunction &MF) const {
     StackOffset += RegSize;
   }
 
-  if (MFI->hasCalls()) {
+  if (MFI->adjustsStack()) {
     MBlazeFI->setRAStackOffset(0);
     MFI->setObjectOffset(MFI->CreateStackObject(RegSize, RegSize, true),
                          StackOffset);
@@ -243,7 +243,7 @@ void MBlazeRegisterInfo::adjustMBlazeStackFrame(MachineFunction &MF) const {
 // if frame pointer elimination is disabled.
 bool MBlazeRegisterInfo::hasFP(const MachineFunction &MF) const {
   const MachineFrameInfo *MFI = MF.getFrameInfo();
-  return NoFramePointerElim || MFI->hasVarSizedObjects();
+  return DisableFramePointerElim(MF) || MFI->hasVarSizedObjects();
 }
 
 // This function eliminate ADJCALLSTACKDOWN,
@@ -302,8 +302,7 @@ emitPrologue(MachineFunction &MF) const {
   MachineFrameInfo *MFI    = MF.getFrameInfo();
   MBlazeFunctionInfo *MBlazeFI = MF.getInfo<MBlazeFunctionInfo>();
   MachineBasicBlock::iterator MBBI = MBB.begin();
-  DebugLoc dl = (MBBI != MBB.end() ?
-                 MBBI->getDebugLoc() : DebugLoc::getUnknownLoc());
+  DebugLoc DL = MBBI != MBB.end() ? MBBI->getDebugLoc() : DebugLoc();
 
   // Get the right frame order for MBlaze.
   adjustMBlazeStackFrame(MF);
@@ -312,20 +311,20 @@ emitPrologue(MachineFunction &MF) const {
   unsigned StackSize = MFI->getStackSize();
 
   // No need to allocate space on the stack.
-  if (StackSize == 0 && !MFI->hasCalls()) return;
-  if (StackSize < 28 && MFI->hasCalls()) StackSize = 28;
+  if (StackSize == 0 && !MFI->adjustsStack()) return;
+  if (StackSize < 28 && MFI->adjustsStack()) StackSize = 28;
 
   int FPOffset = MBlazeFI->getFPStackOffset();
   int RAOffset = MBlazeFI->getRAStackOffset();
 
   // Adjust stack : addi R1, R1, -imm
-  BuildMI(MBB, MBBI, dl, TII.get(MBlaze::ADDI), MBlaze::R1)
+  BuildMI(MBB, MBBI, DL, TII.get(MBlaze::ADDI), MBlaze::R1)
       .addReg(MBlaze::R1).addImm(-StackSize);
 
   // Save the return address only if the function isnt a leaf one.
   // swi  R15, R1, stack_loc
-  if (MFI->hasCalls()) {
-    BuildMI(MBB, MBBI, dl, TII.get(MBlaze::SWI))
+  if (MFI->adjustsStack()) {
+    BuildMI(MBB, MBBI, DL, TII.get(MBlaze::SWI))
         .addReg(MBlaze::R15).addImm(RAOffset).addReg(MBlaze::R1);
   }
 
@@ -333,11 +332,11 @@ emitPrologue(MachineFunction &MF) const {
   // to point to the stack pointer
   if (hasFP(MF)) {
     // swi  R19, R1, stack_loc
-    BuildMI(MBB, MBBI, dl, TII.get(MBlaze::SWI))
+    BuildMI(MBB, MBBI, DL, TII.get(MBlaze::SWI))
       .addReg(MBlaze::R19).addImm(FPOffset).addReg(MBlaze::R1);
 
     // add R19, R1, R0
-    BuildMI(MBB, MBBI, dl, TII.get(MBlaze::ADD), MBlaze::R19)
+    BuildMI(MBB, MBBI, DL, TII.get(MBlaze::ADD), MBlaze::R19)
       .addReg(MBlaze::R1).addReg(MBlaze::R0);
   }
 }
@@ -367,14 +366,14 @@ emitEpilogue(MachineFunction &MF, MachineBasicBlock &MBB) const {
 
   // Restore the return address only if the function isnt a leaf one.
   // lwi R15, R1, stack_loc
-  if (MFI->hasCalls()) {
+  if (MFI->adjustsStack()) {
     BuildMI(MBB, MBBI, dl, TII.get(MBlaze::LWI), MBlaze::R15)
       .addImm(RAOffset).addReg(MBlaze::R1);
   }
 
   // Get the number of bytes from FrameInfo
   int StackSize = (int) MFI->getStackSize();
-  if (StackSize < 28 && MFI->hasCalls()) StackSize = 28;
+  if (StackSize < 28 && MFI->adjustsStack()) StackSize = 28;
 
   // adjust stack.
   // addi R1, R1, imm

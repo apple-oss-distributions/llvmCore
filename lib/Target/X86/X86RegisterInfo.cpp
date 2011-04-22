@@ -37,7 +37,6 @@
 #include "llvm/Target/TargetOptions.h"
 #include "llvm/ADT/BitVector.h"
 #include "llvm/ADT/STLExtras.h"
-#include "llvm/Support/CommandLine.h"
 #include "llvm/Support/ErrorHandling.h"
 using namespace llvm;
 
@@ -297,9 +296,7 @@ X86RegisterInfo::getCalleeSavedRegs(const MachineFunction *MF) const {
   bool ghcCall = false;
 
   if (MF) {
-    const MachineFrameInfo *MFI = MF->getFrameInfo();
-    const MachineModuleInfo *MMI = MFI->getMachineModuleInfo();
-    callsEHReturn = (MMI ? MMI->callsEHReturn() : false);
+    callsEHReturn = MF->getMMI().callsEHReturn();
     const Function *F = MF->getFunction();
     ghcCall = (F ? F->getCallingConv() == CallingConv::GHC : false);
   }
@@ -348,12 +345,8 @@ X86RegisterInfo::getCalleeSavedRegs(const MachineFunction *MF) const {
 const TargetRegisterClass* const*
 X86RegisterInfo::getCalleeSavedRegClasses(const MachineFunction *MF) const {
   bool callsEHReturn = false;
-
-  if (MF) {
-    const MachineFrameInfo *MFI = MF->getFrameInfo();
-    const MachineModuleInfo *MMI = MFI->getMachineModuleInfo();
-    callsEHReturn = (MMI ? MMI->callsEHReturn() : false);
-  }
+  if (MF)
+    callsEHReturn = MF->getMMI().callsEHReturn();
 
   static const TargetRegisterClass * const CalleeSavedRegClasses32Bit[] = {
     &X86::GR32RegClass, &X86::GR32RegClass,
@@ -443,14 +436,14 @@ BitVector X86RegisterInfo::getReservedRegs(const MachineFunction &MF) const {
 /// or if frame pointer elimination is disabled.
 bool X86RegisterInfo::hasFP(const MachineFunction &MF) const {
   const MachineFrameInfo *MFI = MF.getFrameInfo();
-  const MachineModuleInfo *MMI = MFI->getMachineModuleInfo();
+  const MachineModuleInfo &MMI = MF.getMMI();
 
-  return (NoFramePointerElim ||
+  return (DisableFramePointerElim(MF) ||
           needsStackRealignment(MF) ||
           MFI->hasVarSizedObjects() ||
           MFI->isFrameAddressTaken() ||
           MF.getInfo<X86MachineFunctionInfo>()->getForceFramePointer() ||
-          (MMI && MMI->callsUnwindInit()));
+          MMI.callsUnwindInit());
 }
 
 bool X86RegisterInfo::canRealignStack(const MachineFunction &MF) const {
@@ -470,7 +463,7 @@ bool X86RegisterInfo::needsStackRealignment(const MachineFunction &MF) const {
   //        variable-sized allocas.
   // FIXME: Temporary disable the error - it seems to be too conservative.
   if (0 && requiresRealignment && MFI->hasVarSizedObjects())
-    llvm_report_error(
+    report_fatal_error(
       "Stack realignment in presense of dynamic allocas is not supported");
 
   return (requiresRealignment && !MFI->hasVarSizedObjects());
@@ -524,6 +517,30 @@ X86RegisterInfo::getFrameIndexOffset(const MachineFunction &MF, int FI) const {
   return Offset;
 }
 
+static unsigned getSUBriOpcode(unsigned is64Bit, int64_t Imm) {
+  if (is64Bit) {
+    if (isInt<8>(Imm))
+      return X86::SUB64ri8;
+    return X86::SUB64ri32;
+  } else {
+    if (isInt<8>(Imm))
+      return X86::SUB32ri8;
+    return X86::SUB32ri;
+  }
+}
+
+static unsigned getADDriOpcode(unsigned is64Bit, int64_t Imm) {
+  if (is64Bit) {
+    if (isInt<8>(Imm))
+      return X86::ADD64ri8;
+    return X86::ADD64ri32;
+  } else {
+    if (isInt<8>(Imm))
+      return X86::ADD32ri8;
+    return X86::ADD32ri;
+  }
+}
+
 void X86RegisterInfo::
 eliminateCallFramePseudoInstr(MachineFunction &MF, MachineBasicBlock &MBB,
                               MachineBasicBlock::iterator I) const {
@@ -543,7 +560,7 @@ eliminateCallFramePseudoInstr(MachineFunction &MF, MachineBasicBlock &MBB,
       MachineInstr *New = 0;
       if (Old->getOpcode() == getCallFrameSetupOpcode()) {
         New = BuildMI(MF, Old->getDebugLoc(),
-                      TII.get(Is64Bit ? X86::SUB64ri32 : X86::SUB32ri),
+                      TII.get(getSUBriOpcode(Is64Bit, Amount)),
                       StackPtr)
           .addReg(StackPtr)
           .addImm(Amount);
@@ -555,9 +572,7 @@ eliminateCallFramePseudoInstr(MachineFunction &MF, MachineBasicBlock &MBB,
         Amount -= CalleeAmt;
   
       if (Amount) {
-          unsigned Opc = (Amount < 128) ?
-            (Is64Bit ? X86::ADD64ri8 : X86::ADD32ri8) :
-            (Is64Bit ? X86::ADD64ri32 : X86::ADD32ri);
+          unsigned Opc = getADDriOpcode(Is64Bit, Amount);
           New = BuildMI(MF, Old->getDebugLoc(), TII.get(Opc), StackPtr)
             .addReg(StackPtr)
             .addImm(Amount);
@@ -577,9 +592,7 @@ eliminateCallFramePseudoInstr(MachineFunction &MF, MachineBasicBlock &MBB,
     // something off the stack pointer, add it back.  We do this until we have
     // more advanced stack pointer tracking ability.
     if (uint64_t CalleeAmt = I->getOperand(1).getImm()) {
-      unsigned Opc = (CalleeAmt < 128) ?
-        (Is64Bit ? X86::SUB64ri8 : X86::SUB32ri8) :
-        (Is64Bit ? X86::SUB64ri32 : X86::SUB32ri);
+      unsigned Opc = getSUBriOpcode(Is64Bit, CalleeAmt);
       MachineInstr *Old = I;
       MachineInstr *New =
         BuildMI(MF, Old->getDebugLoc(), TII.get(Opc), 
@@ -614,8 +627,12 @@ X86RegisterInfo::eliminateFrameIndex(MachineBasicBlock::iterator II,
   int FrameIndex = MI.getOperand(i).getIndex();
   unsigned BasePtr;
 
+  unsigned Opc = MI.getOpcode();
+  bool AfterFPPop = Opc == X86::TAILJMPm64 || Opc == X86::TAILJMPm;
   if (needsStackRealignment(MF))
     BasePtr = (FrameIndex < 0 ? FramePtr : StackPtr);
+  else if (AfterFPPop)
+    BasePtr = StackPtr;
   else
     BasePtr = (hasFP(MF) ? FramePtr : StackPtr);
 
@@ -624,16 +641,22 @@ X86RegisterInfo::eliminateFrameIndex(MachineBasicBlock::iterator II,
   MI.getOperand(i).ChangeToRegister(BasePtr, false);
 
   // Now add the frame object offset to the offset from EBP.
+  int FIOffset;
+  if (AfterFPPop) {
+    // Tail call jmp happens after FP is popped.
+    const TargetFrameInfo &TFI = *MF.getTarget().getFrameInfo();
+    const MachineFrameInfo *MFI = MF.getFrameInfo();
+    FIOffset = MFI->getObjectOffset(FrameIndex) - TFI.getOffsetOfLocalArea();
+  } else
+    FIOffset = getFrameIndexOffset(MF, FrameIndex);
+
   if (MI.getOperand(i+3).isImm()) {
     // Offset is a 32-bit integer.
-    int Offset = getFrameIndexOffset(MF, FrameIndex) +
-      (int)(MI.getOperand(i + 3).getImm());
-
+    int Offset = FIOffset + (int)(MI.getOperand(i + 3).getImm());
     MI.getOperand(i + 3).ChangeToImmediate(Offset);
   } else {
     // Offset is symbolic. This is extremely rare.
-    uint64_t Offset = getFrameIndexOffset(MF, FrameIndex) +
-                      (uint64_t)MI.getOperand(i+3).getOffset();
+    uint64_t Offset = FIOffset + (uint64_t)MI.getOperand(i+3).getOffset();
     MI.getOperand(i+3).setOffset(Offset);
   }
   return 0;
@@ -687,13 +710,9 @@ void emitSPUpdate(MachineBasicBlock &MBB, MachineBasicBlock::iterator &MBBI,
                   const TargetInstrInfo &TII) {
   bool isSub = NumBytes < 0;
   uint64_t Offset = isSub ? -NumBytes : NumBytes;
-  unsigned Opc = isSub
-    ? ((Offset < 128) ?
-       (Is64Bit ? X86::SUB64ri8 : X86::SUB32ri8) :
-       (Is64Bit ? X86::SUB64ri32 : X86::SUB32ri))
-    : ((Offset < 128) ?
-       (Is64Bit ? X86::ADD64ri8 : X86::ADD32ri8) :
-       (Is64Bit ? X86::ADD64ri32 : X86::ADD32ri));
+  unsigned Opc = isSub ?
+    getSUBriOpcode(Is64Bit, Offset) :
+    getADDriOpcode(Is64Bit, Offset);
   uint64_t Chunk = (1LL << 31) - 1;
   DebugLoc DL = MBB.findDebugLoc(MBBI);
 
@@ -800,14 +819,13 @@ void X86RegisterInfo::emitCalleeSavedFrameMoves(MachineFunction &MF,
                                                 MCSymbol *Label,
                                                 unsigned FramePtr) const {
   MachineFrameInfo *MFI = MF.getFrameInfo();
-  MachineModuleInfo *MMI = MFI->getMachineModuleInfo();
-  if (!MMI) return;
+  MachineModuleInfo &MMI = MF.getMMI();
 
   // Add callee saved registers to move list.
   const std::vector<CalleeSavedInfo> &CSI = MFI->getCalleeSavedInfo();
   if (CSI.empty()) return;
 
-  std::vector<MachineMove> &Moves = MMI->getFrameMoves();
+  std::vector<MachineMove> &Moves = MMI.getFrameMoves();
   const TargetData *TD = MF.getTarget().getTargetData();
   bool HasFP = hasFP(MF);
 
@@ -874,9 +892,9 @@ void X86RegisterInfo::emitPrologue(MachineFunction &MF) const {
   MachineFrameInfo *MFI = MF.getFrameInfo();
   const Function *Fn = MF.getFunction();
   const X86Subtarget *Subtarget = &MF.getTarget().getSubtarget<X86Subtarget>();
-  MachineModuleInfo *MMI = MFI->getMachineModuleInfo();
+  MachineModuleInfo &MMI = MF.getMMI();
   X86MachineFunctionInfo *X86FI = MF.getInfo<X86MachineFunctionInfo>();
-  bool needsFrameMoves = (MMI && MMI->hasDebugInfo()) ||
+  bool needsFrameMoves = MMI.hasDebugInfo() ||
                           !Fn->doesNotThrow() || UnwindTablesMandatory;
   uint64_t MaxAlign  = MFI->getMaxAlignment(); // Desired stack alignment.
   uint64_t StackSize = MFI->getStackSize();    // Number of bytes to allocate.
@@ -896,7 +914,7 @@ void X86RegisterInfo::emitPrologue(MachineFunction &MF) const {
   if (Is64Bit && !Fn->hasFnAttr(Attribute::NoRedZone) &&
       !needsStackRealignment(MF) &&
       !MFI->hasVarSizedObjects() &&                // No dynamic alloca.
-      !MFI->hasCalls() &&                          // No calls.
+      !MFI->adjustsStack() &&                      // No calls.
       !Subtarget->isTargetWin64()) {               // Win64 has no Red Zone
     uint64_t MinSize = X86FI->getCalleeSavedFrameSize();
     if (HasFP) MinSize += SlotSize;
@@ -914,7 +932,8 @@ void X86RegisterInfo::emitPrologue(MachineFunction &MF) const {
   // size is bigger than the callers.
   if (TailCallReturnAddrDelta < 0) {
     MachineInstr *MI =
-      BuildMI(MBB, MBBI, DL, TII.get(Is64Bit? X86::SUB64ri32 : X86::SUB32ri),
+      BuildMI(MBB, MBBI, DL,
+              TII.get(getSUBriOpcode(Is64Bit, -TailCallReturnAddrDelta)),
               StackPtr)
         .addReg(StackPtr)
         .addImm(-TailCallReturnAddrDelta);
@@ -935,7 +954,7 @@ void X86RegisterInfo::emitPrologue(MachineFunction &MF) const {
   //        REG < 64                    => DW_CFA_offset + Reg
   //        ELSE                        => DW_CFA_offset_extended
 
-  std::vector<MachineMove> &Moves = MMI->getFrameMoves();
+  std::vector<MachineMove> &Moves = MMI.getFrameMoves();
   const TargetData *TD = MF.getTarget().getTargetData();
   uint64_t NumBytes = 0;
   int stackGrowth = -TD->getPointerSize();
@@ -959,7 +978,7 @@ void X86RegisterInfo::emitPrologue(MachineFunction &MF) const {
 
     if (needsFrameMoves) {
       // Mark the place where EBP/RBP was saved.
-      MCSymbol *FrameLabel = MMI->getContext().CreateTempSymbol();
+      MCSymbol *FrameLabel = MMI.getContext().CreateTempSymbol();
       BuildMI(MBB, MBBI, DL, TII.get(X86::DBG_LABEL)).addSym(FrameLabel);
 
       // Define the current CFA rule to use the provided offset.
@@ -987,7 +1006,7 @@ void X86RegisterInfo::emitPrologue(MachineFunction &MF) const {
 
     if (needsFrameMoves) {
       // Mark effective beginning of when frame pointer becomes valid.
-      MCSymbol *FrameLabel = MMI->getContext().CreateTempSymbol();
+      MCSymbol *FrameLabel = MMI.getContext().CreateTempSymbol();
       BuildMI(MBB, MBBI, DL, TII.get(X86::DBG_LABEL)).addSym(FrameLabel);
 
       // Define the current CFA to use the EBP/RBP register.
@@ -1027,7 +1046,7 @@ void X86RegisterInfo::emitPrologue(MachineFunction &MF) const {
 
     if (!HasFP && needsFrameMoves) {
       // Mark callee-saved push instruction.
-      MCSymbol *Label = MMI->getContext().CreateTempSymbol();
+      MCSymbol *Label = MMI.getContext().CreateTempSymbol();
       BuildMI(MBB, MBBI, DL, TII.get(X86::DBG_LABEL)).addSym(Label);
 
       // Define the current CFA rule to use the provided offset.
@@ -1099,7 +1118,7 @@ void X86RegisterInfo::emitPrologue(MachineFunction &MF) const {
 
   if ((NumBytes || PushedRegs) && needsFrameMoves) {
     // Mark end of stack pointer adjustment.
-    MCSymbol *Label = MMI->getContext().CreateTempSymbol();
+    MCSymbol *Label = MMI.getContext().CreateTempSymbol();
     BuildMI(MBB, MBBI, DL, TII.get(X86::DBG_LABEL)).addSym(Label);
 
     if (!HasFP && NumBytes) {
@@ -1304,7 +1323,7 @@ X86RegisterInfo::getInitialFrameState(std::vector<MachineMove> &Moves) const {
   // Calculate amount of bytes used for return address storing
   int stackGrowth = (Is64Bit ? -8 : -4);
 
-  // Initial state of the frame pointer is esp+4.
+  // Initial state of the frame pointer is esp+stackGrowth.
   MachineLocation Dst(MachineLocation::VirtualFP);
   MachineLocation Src(StackPtr, stackGrowth);
   Moves.push_back(MachineMove(0, Dst, Src));
@@ -1494,3 +1513,46 @@ unsigned getX86SubSuperRegister(unsigned Reg, EVT VT, bool High) {
 }
 
 #include "X86GenRegisterInfo.inc"
+
+namespace {
+  struct MSAH : public MachineFunctionPass {
+    static char ID;
+    MSAH() : MachineFunctionPass(&ID) {}
+
+    virtual bool runOnMachineFunction(MachineFunction &MF) {
+      const X86TargetMachine *TM =
+        static_cast<const X86TargetMachine *>(&MF.getTarget());
+      const X86RegisterInfo *X86RI = TM->getRegisterInfo();
+      MachineRegisterInfo &RI = MF.getRegInfo();
+      X86MachineFunctionInfo *FuncInfo = MF.getInfo<X86MachineFunctionInfo>();
+      unsigned StackAlignment = X86RI->getStackAlignment();
+
+      // Be over-conservative: scan over all vreg defs and find whether vector
+      // registers are used. If yes, there is a possibility that vector register
+      // will be spilled and thus require dynamic stack realignment.
+      for (unsigned RegNum = TargetRegisterInfo::FirstVirtualRegister;
+           RegNum < RI.getLastVirtReg(); ++RegNum)
+        if (RI.getRegClass(RegNum)->getAlignment() > StackAlignment) {
+          FuncInfo->setReserveFP(true);
+          return true;
+        }
+
+      // Nothing to do
+      return false;
+    }
+
+    virtual const char *getPassName() const {
+      return "X86 Maximal Stack Alignment Check";
+    }
+
+    virtual void getAnalysisUsage(AnalysisUsage &AU) const {
+      AU.setPreservesCFG();
+      MachineFunctionPass::getAnalysisUsage(AU);
+    }
+  };
+
+  char MSAH::ID = 0;
+}
+
+FunctionPass*
+llvm::createX86MaxStackAlignmentHeuristicPass() { return new MSAH(); }

@@ -34,6 +34,7 @@
 #include "llvm/Instructions.h"
 #include "llvm/Analysis/ConstantFolding.h"
 #include "llvm/Analysis/InlineCost.h"
+#include "llvm/Analysis/InstructionSimplify.h"
 #include "llvm/Analysis/LoopInfo.h"
 #include "llvm/Analysis/LoopPass.h"
 #include "llvm/Analysis/Dominators.h"
@@ -231,8 +232,7 @@ bool LoopUnswitch::processCurrentLoop() {
   // block that is branching on a loop-invariant condition, we can unswitch this
   // loop.
   for (Loop::block_iterator I = currentLoop->block_begin(), 
-         E = currentLoop->block_end();
-       I != E; ++I) {
+         E = currentLoop->block_end(); I != E; ++I) {
     TerminatorInst *TI = (*I)->getTerminator();
     if (BranchInst *BI = dyn_cast<BranchInst>(TI)) {
       // If this isn't branching on an invariant condition, we can't unswitch
@@ -415,46 +415,44 @@ bool LoopUnswitch::UnswitchIfProfitable(Value *LoopCond, Constant *Val) {
 
   Function *F = loopHeader->getParent();
 
-  // If the condition is trivial, always unswitch.  There is no code growth for
-  // this case.
-  if (!IsTrivialUnswitchCondition(LoopCond)) {
-    // Check to see if it would be profitable to unswitch current loop.
-
-    // Do not do non-trivial unswitch while optimizing for size.
-    if (OptimizeForSize || F->hasFnAttr(Attribute::OptimizeForSize))
-      return false;
-
-    // FIXME: This is overly conservative because it does not take into
-    // consideration code simplification opportunities and code that can
-    // be shared by the resultant unswitched loops.
-    CodeMetrics Metrics;
-    for (Loop::block_iterator I = currentLoop->block_begin(), 
-           E = currentLoop->block_end();
-         I != E; ++I)
-      Metrics.analyzeBasicBlock(*I);
-
-    // Limit the number of instructions to avoid causing significant code
-    // expansion, and the number of basic blocks, to avoid loops with
-    // large numbers of branches which cause loop unswitching to go crazy.
-    // This is a very ad-hoc heuristic.
-    if (Metrics.NumInsts > Threshold ||
-        Metrics.NumBlocks * 5 > Threshold ||
-        Metrics.NeverInline) {
-      DEBUG(dbgs() << "NOT unswitching loop %"
-            << currentLoop->getHeader()->getName() << ", cost too high: "
-            << currentLoop->getBlocks().size() << "\n");
-      return false;
-    }
-  }
-
-  Constant *CondVal;
-  BasicBlock *ExitBlock;
+  Constant *CondVal = 0;
+  BasicBlock *ExitBlock = 0;
   if (IsTrivialUnswitchCondition(LoopCond, &CondVal, &ExitBlock)) {
+    // If the condition is trivial, always unswitch. There is no code growth
+    // for this case.
     UnswitchTrivialCondition(currentLoop, LoopCond, CondVal, ExitBlock);
-  } else {
-    UnswitchNontrivialCondition(LoopCond, Val, currentLoop);
+    return true;
   }
 
+  // Check to see if it would be profitable to unswitch current loop.
+
+  // Do not do non-trivial unswitch while optimizing for size.
+  if (OptimizeForSize || F->hasFnAttr(Attribute::OptimizeForSize))
+    return false;
+
+  // FIXME: This is overly conservative because it does not take into
+  // consideration code simplification opportunities and code that can
+  // be shared by the resultant unswitched loops.
+  CodeMetrics Metrics;
+  for (Loop::block_iterator I = currentLoop->block_begin(), 
+         E = currentLoop->block_end();
+       I != E; ++I)
+    Metrics.analyzeBasicBlock(*I);
+
+  // Limit the number of instructions to avoid causing significant code
+  // expansion, and the number of basic blocks, to avoid loops with
+  // large numbers of branches which cause loop unswitching to go crazy.
+  // This is a very ad-hoc heuristic.
+  if (Metrics.NumInsts > Threshold ||
+      Metrics.NumBlocks * 5 > Threshold ||
+      Metrics.NeverInline) {
+    DEBUG(dbgs() << "NOT unswitching loop %"
+          << currentLoop->getHeader()->getName() << ", cost too high: "
+          << currentLoop->getBlocks().size() << "\n");
+    return false;
+  }
+
+  UnswitchNontrivialCondition(LoopCond, Val, currentLoop);
   return true;
 }
 
@@ -476,7 +474,6 @@ static inline void RemapInstruction(Instruction *I,
 static Loop *CloneLoop(Loop *L, Loop *PL, DenseMap<const Value*, Value*> &VM,
                        LoopInfo *LI, LPPassManager *LPM) {
   Loop *New = new Loop();
-
   LPM->insertLoop(New, PL);
 
   // Add all of the blocks in L to the new loop.
@@ -567,8 +564,7 @@ void LoopUnswitch::UnswitchTrivialCondition(Loop *L, Value *Cond,
 /// SplitExitEdges - Split all of the edges from inside the loop to their exit
 /// blocks.  Update the appropriate Phi nodes as we do so.
 void LoopUnswitch::SplitExitEdges(Loop *L, 
-                                const SmallVector<BasicBlock *, 8> &ExitBlocks) 
-{
+                                const SmallVector<BasicBlock *, 8> &ExitBlocks){
 
   for (unsigned i = 0, e = ExitBlocks.size(); i != e; ++i) {
     BasicBlock *ExitBlock = ExitBlocks[i];
@@ -621,15 +617,15 @@ void LoopUnswitch::UnswitchNontrivialCondition(Value *LIC, Constant *Val,
   NewBlocks.reserve(LoopBlocks.size());
   DenseMap<const Value*, Value*> ValueMap;
   for (unsigned i = 0, e = LoopBlocks.size(); i != e; ++i) {
-    BasicBlock *New = CloneBasicBlock(LoopBlocks[i], ValueMap, ".us", F);
-    NewBlocks.push_back(New);
-    ValueMap[LoopBlocks[i]] = New;  // Keep the BB mapping.
-    LPM->cloneBasicBlockSimpleAnalysis(LoopBlocks[i], New, L);
+    BasicBlock *NewBB = CloneBasicBlock(LoopBlocks[i], ValueMap, ".us", F);
+    NewBlocks.push_back(NewBB);
+    ValueMap[LoopBlocks[i]] = NewBB;  // Keep the BB mapping.
+    LPM->cloneBasicBlockSimpleAnalysis(LoopBlocks[i], NewBB, L);
   }
 
   // Splice the newly inserted blocks into the function right before the
   // original preheader.
-  F->getBasicBlockList().splice(LoopBlocks[0], F->getBasicBlockList(),
+  F->getBasicBlockList().splice(NewPreheader, F->getBasicBlockList(),
                                 NewBlocks[0], F->end());
 
   // Now we create the new Loop object for the versioned loop.
@@ -654,8 +650,8 @@ void LoopUnswitch::UnswitchNontrivialCondition(Value *LIC, Constant *Val,
     // If the successor of the exit block had PHI nodes, add an entry for
     // NewExit.
     PHINode *PN;
-    for (BasicBlock::iterator I = ExitSucc->begin();
-         (PN = dyn_cast<PHINode>(I)); ++I) {
+    for (BasicBlock::iterator I = ExitSucc->begin(); isa<PHINode>(I); ++I) {
+      PN = cast<PHINode>(I);
       Value *V = PN->getIncomingValueForBlock(ExitBlocks[i]);
       DenseMap<const Value *, Value*>::iterator It = ValueMap.find(V);
       if (It != ValueMap.end()) V = It->second;
@@ -682,15 +678,22 @@ void LoopUnswitch::UnswitchNontrivialCondition(Value *LIC, Constant *Val,
   LoopProcessWorklist.push_back(NewLoop);
   redoLoop = true;
 
+  // Keep a WeakVH holding onto LIC.  If the first call to RewriteLoopBody
+  // deletes the instruction (for example by simplifying a PHI that feeds into
+  // the condition that we're unswitching on), we don't rewrite the second
+  // iteration.
+  WeakVH LICHandle(LIC);
+  
   // Now we rewrite the original code to know that the condition is true and the
   // new code to know that the condition is false.
-  RewriteLoopBodyWithConditionConstant(L      , LIC, Val, false);
-  
-  // It's possible that simplifying one loop could cause the other to be
-  // deleted.  If so, don't simplify it.
-  if (!LoopProcessWorklist.empty() && LoopProcessWorklist.back() == NewLoop)
-    RewriteLoopBodyWithConditionConstant(NewLoop, LIC, Val, true);
+  RewriteLoopBodyWithConditionConstant(L, LIC, Val, false);
 
+  // It's possible that simplifying one loop could cause the other to be
+  // changed to another value or a constant.  If its a constant, don't simplify
+  // it.
+  if (!LoopProcessWorklist.empty() && LoopProcessWorklist.back() == NewLoop &&
+      LICHandle && !isa<Constant>(LICHandle))
+    RewriteLoopBodyWithConditionConstant(NewLoop, LICHandle, Val, true);
 }
 
 /// RemoveFromWorklist - Remove all instances of I from the worklist vector
@@ -886,65 +889,66 @@ void LoopUnswitch::RewriteLoopBodyWithConditionConstant(Loop *L, Value *LIC,
         U->replaceUsesOfWith(LIC, Replacement);
         Worklist.push_back(U);
       }
-  } else {
-    // Otherwise, we don't know the precise value of LIC, but we do know that it
-    // is certainly NOT "Val".  As such, simplify any uses in the loop that we
-    // can.  This case occurs when we unswitch switch statements.
-    for (unsigned i = 0, e = Users.size(); i != e; ++i)
-      if (Instruction *U = cast<Instruction>(Users[i])) {
-        if (!L->contains(U))
-          continue;
+    SimplifyCode(Worklist, L);
+    return;
+  }
+  
+  // Otherwise, we don't know the precise value of LIC, but we do know that it
+  // is certainly NOT "Val".  As such, simplify any uses in the loop that we
+  // can.  This case occurs when we unswitch switch statements.
+  for (unsigned i = 0, e = Users.size(); i != e; ++i) {
+    Instruction *U = cast<Instruction>(Users[i]);
+    if (!L->contains(U))
+      continue;
 
-        Worklist.push_back(U);
+    Worklist.push_back(U);
 
-        // If we know that LIC is not Val, use this info to simplify code.
-        if (SwitchInst *SI = dyn_cast<SwitchInst>(U)) {
-          for (unsigned i = 1, e = SI->getNumCases(); i != e; ++i) {
-            if (SI->getCaseValue(i) == Val) {
-              // Found a dead case value.  Don't remove PHI nodes in the 
-              // successor if they become single-entry, those PHI nodes may
-              // be in the Users list.
-              
-              // FIXME: This is a hack.  We need to keep the successor around
-              // and hooked up so as to preserve the loop structure, because
-              // trying to update it is complicated.  So instead we preserve the
-              // loop structure and put the block on a dead code path.
-              BasicBlock *Switch = SI->getParent();
-              SplitEdge(Switch, SI->getSuccessor(i), this);
-              // Compute the successors instead of relying on the return value
-              // of SplitEdge, since it may have split the switch successor
-              // after PHI nodes.
-              BasicBlock *NewSISucc = SI->getSuccessor(i);
-              BasicBlock *OldSISucc = *succ_begin(NewSISucc);
-              // Create an "unreachable" destination.
-              BasicBlock *Abort = BasicBlock::Create(Context, "us-unreachable",
-                                                     Switch->getParent(),
-                                                     OldSISucc);
-              new UnreachableInst(Context, Abort);
-              // Force the new case destination to branch to the "unreachable"
-              // block while maintaining a (dead) CFG edge to the old block.
-              NewSISucc->getTerminator()->eraseFromParent();
-              BranchInst::Create(Abort, OldSISucc,
-                                 ConstantInt::getTrue(Context), NewSISucc);
-              // Release the PHI operands for this edge.
-              for (BasicBlock::iterator II = NewSISucc->begin();
-                   PHINode *PN = dyn_cast<PHINode>(II); ++II)
-                PN->setIncomingValue(PN->getBasicBlockIndex(Switch),
-                                     UndefValue::get(PN->getType()));
-              // Tell the domtree about the new block. We don't fully update the
-              // domtree here -- instead we force it to do a full recomputation
-              // after the pass is complete -- but we do need to inform it of
-              // new blocks.
-              if (DT)
-                DT->addNewBlock(Abort, NewSISucc);
-              break;
-            }
-          }
-        }
+    // TODO: We could do other simplifications, for example, turning 
+    // 'icmp eq LIC, Val' -> false.
+
+    // If we know that LIC is not Val, use this info to simplify code.
+    SwitchInst *SI = dyn_cast<SwitchInst>(U);
+    if (SI == 0 || !isa<ConstantInt>(Val)) continue;
+    
+    unsigned DeadCase = SI->findCaseValue(cast<ConstantInt>(Val));
+    if (DeadCase == 0) continue;  // Default case is live for multiple values.
+    
+    // Found a dead case value.  Don't remove PHI nodes in the 
+    // successor if they become single-entry, those PHI nodes may
+    // be in the Users list.
         
-        // TODO: We could do other simplifications, for example, turning 
-        // LIC == Val -> false.
-      }
+    // FIXME: This is a hack.  We need to keep the successor around
+    // and hooked up so as to preserve the loop structure, because
+    // trying to update it is complicated.  So instead we preserve the
+    // loop structure and put the block on a dead code path.
+    BasicBlock *Switch = SI->getParent();
+    SplitEdge(Switch, SI->getSuccessor(DeadCase), this);
+    // Compute the successors instead of relying on the return value
+    // of SplitEdge, since it may have split the switch successor
+    // after PHI nodes.
+    BasicBlock *NewSISucc = SI->getSuccessor(DeadCase);
+    BasicBlock *OldSISucc = *succ_begin(NewSISucc);
+    // Create an "unreachable" destination.
+    BasicBlock *Abort = BasicBlock::Create(Context, "us-unreachable",
+                                           Switch->getParent(),
+                                           OldSISucc);
+    new UnreachableInst(Context, Abort);
+    // Force the new case destination to branch to the "unreachable"
+    // block while maintaining a (dead) CFG edge to the old block.
+    NewSISucc->getTerminator()->eraseFromParent();
+    BranchInst::Create(Abort, OldSISucc,
+                       ConstantInt::getTrue(Context), NewSISucc);
+    // Release the PHI operands for this edge.
+    for (BasicBlock::iterator II = NewSISucc->begin();
+         PHINode *PN = dyn_cast<PHINode>(II); ++II)
+      PN->setIncomingValue(PN->getBasicBlockIndex(Switch),
+                           UndefValue::get(PN->getType()));
+    // Tell the domtree about the new block. We don't fully update the
+    // domtree here -- instead we force it to do a full recomputation
+    // after the pass is complete -- but we do need to inform it of
+    // new blocks.
+    if (DT)
+      DT->addNewBlock(Abort, NewSISucc);
   }
   
   SimplifyCode(Worklist, L);
@@ -985,45 +989,16 @@ void LoopUnswitch::SimplifyCode(std::vector<Instruction*> &Worklist, Loop *L) {
       continue;
     }
     
+    // See if instruction simplification can hack this up.  This is common for
+    // things like "select false, X, Y" after unswitching made the condition be
+    // 'false'.
+    if (Value *V = SimplifyInstruction(I)) {
+      ReplaceUsesOfWith(I, V, Worklist, L, LPM);
+      continue;
+    }
+    
     // Special case hacks that appear commonly in unswitched code.
-    switch (I->getOpcode()) {
-    case Instruction::Select:
-      if (ConstantInt *CB = dyn_cast<ConstantInt>(I->getOperand(0))) {
-        ReplaceUsesOfWith(I, I->getOperand(!CB->getZExtValue()+1), Worklist, L,
-                          LPM);
-        continue;
-      }
-      break;
-    case Instruction::And:
-      if (isa<ConstantInt>(I->getOperand(0)) && 
-          // constant -> RHS
-          I->getOperand(0)->getType()->isIntegerTy(1))
-        cast<BinaryOperator>(I)->swapOperands();
-      if (ConstantInt *CB = dyn_cast<ConstantInt>(I->getOperand(1))) 
-        if (CB->getType()->isIntegerTy(1)) {
-          if (CB->isOne())      // X & 1 -> X
-            ReplaceUsesOfWith(I, I->getOperand(0), Worklist, L, LPM);
-          else                  // X & 0 -> 0
-            ReplaceUsesOfWith(I, I->getOperand(1), Worklist, L, LPM);
-          continue;
-        }
-      break;
-    case Instruction::Or:
-      if (isa<ConstantInt>(I->getOperand(0)) &&
-          // constant -> RHS
-          I->getOperand(0)->getType()->isIntegerTy(1))
-        cast<BinaryOperator>(I)->swapOperands();
-      if (ConstantInt *CB = dyn_cast<ConstantInt>(I->getOperand(1)))
-        if (CB->getType()->isIntegerTy(1)) {
-          if (CB->isOne())   // X | 1 -> 1
-            ReplaceUsesOfWith(I, I->getOperand(1), Worklist, L, LPM);
-          else                  // X | 0 -> X
-            ReplaceUsesOfWith(I, I->getOperand(0), Worklist, L, LPM);
-          continue;
-        }
-      break;
-    case Instruction::Br: {
-      BranchInst *BI = cast<BranchInst>(I);
+    if (BranchInst *BI = dyn_cast<BranchInst>(I)) {
       if (BI->isUnconditional()) {
         // If BI's parent is the only pred of the successor, fold the two blocks
         // together.
@@ -1056,10 +1031,13 @@ void LoopUnswitch::SimplifyCode(std::vector<Instruction*> &Worklist, Loop *L) {
         LPM->deleteSimpleAnalysisValue(Succ, L);
         Succ->eraseFromParent();
         ++NumSimplify;
-      } else if (ConstantInt *CB = dyn_cast<ConstantInt>(BI->getCondition())){
+        continue;
+      }
+      
+      if (ConstantInt *CB = dyn_cast<ConstantInt>(BI->getCondition())){
         // Conditional branch.  Turn it into an unconditional branch, then
         // remove dead blocks.
-        break;  // FIXME: Enable.
+        continue;  // FIXME: Enable.
 
         DEBUG(dbgs() << "Folded branch: " << *BI);
         BasicBlock *DeadSucc = BI->getSuccessor(CB->getZExtValue());
@@ -1073,8 +1051,7 @@ void LoopUnswitch::SimplifyCode(std::vector<Instruction*> &Worklist, Loop *L) {
 
         RemoveBlockIfDead(DeadSucc, Worklist, L);
       }
-      break;
-    }
+      continue;
     }
   }
 }

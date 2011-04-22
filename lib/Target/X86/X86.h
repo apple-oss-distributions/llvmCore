@@ -41,6 +41,10 @@ FunctionPass *createX86ISelDag(X86TargetMachine &TM,
 ///
 FunctionPass *createX86FloatingPointStackifierPass();
 
+/// createSSEDomainFixPass - This pass twiddles SSE opcodes to prevent domain
+/// crossings.
+FunctionPass *createSSEDomainFixPass();
+
 /// createX87FPRegKillInserterPass - This function returns a pass which
 /// inserts FP_REG_KILL instructions where needed.
 ///
@@ -64,6 +68,12 @@ TargetAsmBackend *createX86_64AsmBackend(const Target &, const std::string &);
 /// allocated chunk of memory.
 ///
 FunctionPass *createEmitX86CodeToMemory();
+
+/// createX86MaxStackAlignmentHeuristicPass - This function returns a pass
+/// which determines whether the frame pointer register should be
+/// reserved in case dynamic stack alignment is later required.
+///
+FunctionPass *createX86MaxStackAlignmentHeuristicPass();
 
 extern Target TheX86_32Target, TheX86_64Target;
 

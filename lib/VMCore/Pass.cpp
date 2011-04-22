@@ -18,6 +18,7 @@
 #include "llvm/Module.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringMap.h"
+#include "llvm/Assembly/PrintModulePass.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/ManagedStatic.h"
 #include "llvm/Support/PassNameParser.h"
@@ -41,6 +42,11 @@ Pass::~Pass() {
 
 // Force out-of-line virtual method.
 ModulePass::~ModulePass() { }
+
+Pass *ModulePass::createPrinterPass(raw_ostream &O,
+                                    const std::string &Banner) const {
+  return createPrintModulePass(&O, false, Banner);
+}
 
 PassManagerType ModulePass::getPotentialPassManagerType() const {
   return PMT_ModulePassManager;
@@ -113,6 +119,11 @@ void ImmutablePass::initializePass() {
 // FunctionPass Implementation
 //
 
+Pass *FunctionPass::createPrinterPass(raw_ostream &O,
+                                      const std::string &Banner) const {
+  return createPrintFunctionPass(Banner, &O);
+}
+
 // run - On a module, we run this pass by initializing, runOnFunction'ing once
 // for every function in the module, then by finalizing.
 //
@@ -154,6 +165,13 @@ PassManagerType FunctionPass::getPotentialPassManagerType() const {
 //===----------------------------------------------------------------------===//
 // BasicBlockPass Implementation
 //
+
+Pass *BasicBlockPass::createPrinterPass(raw_ostream &O,
+                                        const std::string &Banner) const {
+  
+  llvm_unreachable("BasicBlockPass printing unsupported.");
+  return 0;
+}
 
 // To run this pass on a function, we simply call runOnBasicBlock once for each
 // function.
@@ -276,13 +294,8 @@ public:
 static std::vector<PassRegistrationListener*> *Listeners = 0;
 static sys::SmartMutex<true> ListenersLock;
 
-// FIXME: This should use ManagedStatic to manage the pass registrar.
-// Unfortunately, we can't do this, because passes are registered with static
-// ctors, and having llvm_shutdown clear this map prevents successful
-// ressurection after llvm_shutdown is run.
+static PassRegistrar *PassRegistrarObj = 0;
 static PassRegistrar *getPassRegistrar() {
-  static PassRegistrar *PassRegistrarObj = 0;
-  
   // Use double-checked locking to safely initialize the registrar when
   // we're running in multithreaded mode.
   PassRegistrar* tmp = PassRegistrarObj;
@@ -303,6 +316,23 @@ static PassRegistrar *getPassRegistrar() {
   }
   
   return PassRegistrarObj;
+}
+
+namespace {
+
+// FIXME: We use ManagedCleanup to erase the pass registrar on shutdown.
+// Unfortunately, passes are registered with static ctors, and having
+// llvm_shutdown clear this map prevents successful ressurection after 
+// llvm_shutdown is run.  Ideally we should find a solution so that we don't
+// leak the map, AND can still resurrect after shutdown.
+void cleanupPassRegistrar(void*) {
+  if (PassRegistrarObj) {
+    delete PassRegistrarObj;
+    PassRegistrarObj = 0;
+  }
+}
+ManagedCleanup<&cleanupPassRegistrar> registrarCleanup ATTRIBUTE_USED;
+
 }
 
 // getPassInfo - Return the PassInfo data structure that corresponds to this

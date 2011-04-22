@@ -55,7 +55,7 @@ namespace llvm {
 
     /// Special pool allocator for VNInfo's (LiveInterval val#).
     ///
-    BumpPtrAllocator VNInfoAllocator;
+    VNInfo::Allocator VNInfoAllocator;
 
     typedef DenseMap<unsigned, LiveInterval*> Reg2IntervalMap;
     Reg2IntervalMap r2iMap_;
@@ -110,6 +110,12 @@ namespace llvm {
     /// measure scales properly with empty index slots in the function.
     double getScaledIntervalSize(LiveInterval& I) {
       return (1000.0 * I.getSize()) / indexes_->getIndexesLength();
+    }
+
+    /// getFuncInstructionCount - Return the number of instructions in the
+    /// current function.
+    unsigned getFuncInstructionCount() {
+      return indexes_->getFunctionSize();
     }
     
     /// getApproximateInstructionCount - computes an estimate of the number
@@ -221,7 +227,7 @@ namespace llvm {
       indexes_->renumberIndexes();
     }
 
-    BumpPtrAllocator& getVNInfoAllocator() { return VNInfoAllocator; }
+    VNInfo::Allocator& getVNInfoAllocator() { return VNInfoAllocator; }
 
     /// getVNInfoSourceReg - Helper function that parses the specified VNInfo
     /// copy field and returns the source register that defines it.
@@ -296,6 +302,12 @@ namespace llvm {
                            MachineBasicBlock::iterator MI,
                            SlotIndex MIIdx,
                            MachineOperand& MO, unsigned MOIdx);
+
+    /// isPartialRedef - Return true if the specified def at the specific index
+    /// is partially re-defining the specified live interval. A common case of
+    /// this is a definition of the sub-register. 
+    bool isPartialRedef(SlotIndex MIIdx, MachineOperand &MO,
+                        LiveInterval &interval);
 
     /// handleVirtualRegisterDef - update intervals for a virtual
     /// register def

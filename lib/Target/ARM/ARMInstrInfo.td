@@ -62,11 +62,14 @@ def ARMcallseq_end   : SDNode<"ISD::CALLSEQ_END",   SDT_ARMCallSeqEnd,
                               [SDNPHasChain, SDNPOptInFlag, SDNPOutFlag]>;
 
 def ARMcall          : SDNode<"ARMISD::CALL", SDT_ARMcall,
-                              [SDNPHasChain, SDNPOptInFlag, SDNPOutFlag]>;
+                              [SDNPHasChain, SDNPOptInFlag, SDNPOutFlag,
+                               SDNPVariadic]>;
 def ARMcall_pred    : SDNode<"ARMISD::CALL_PRED", SDT_ARMcall,
-                              [SDNPHasChain, SDNPOptInFlag, SDNPOutFlag]>;
+                              [SDNPHasChain, SDNPOptInFlag, SDNPOutFlag,
+                               SDNPVariadic]>;
 def ARMcall_nolink   : SDNode<"ARMISD::CALL_NOLINK", SDT_ARMcall,
-                              [SDNPHasChain, SDNPOptInFlag, SDNPOutFlag]>;
+                              [SDNPHasChain, SDNPOptInFlag, SDNPOutFlag,
+                               SDNPVariadic]>;
 
 def ARMretflag       : SDNode<"ARMISD::RET_FLAG", SDTNone,
                               [SDNPHasChain, SDNPOptInFlag]>;
@@ -121,9 +124,12 @@ def HasV6     : Predicate<"Subtarget->hasV6Ops()">;
 def HasV6T2   : Predicate<"Subtarget->hasV6T2Ops()">;
 def NoV6T2    : Predicate<"!Subtarget->hasV6T2Ops()">;
 def HasV7     : Predicate<"Subtarget->hasV7Ops()">;
+def NoVFP     : Predicate<"!Subtarget->hasVFP2()">;
 def HasVFP2   : Predicate<"Subtarget->hasVFP2()">;
 def HasVFP3   : Predicate<"Subtarget->hasVFP3()">;
 def HasNEON   : Predicate<"Subtarget->hasNEON()">;
+def HasDivide : Predicate<"Subtarget->hasDivide()">;
+def HasT2ExtractPack : Predicate<"Subtarget->hasT2ExtractPack()">;
 def UseNEONForFP : Predicate<"Subtarget->useNEONForSinglePrecisionFP()">;
 def DontUseNEONForFP : Predicate<"!Subtarget->useNEONForSinglePrecisionFP()">;
 def IsThumb   : Predicate<"Subtarget->isThumb()">;
@@ -284,7 +290,7 @@ def pclabel : Operand<i32> {
 
 // shifter_operand operands: so_reg and so_imm.
 def so_reg : Operand<i32>,    // reg reg imm
-            ComplexPattern<i32, 3, "SelectShifterOperandReg",
+             ComplexPattern<i32, 3, "SelectShifterOperandReg",
                             [shl,srl,sra,rotr]> {
   let PrintMethod = "printSORegOperand";
   let MIOperandInfo = (ops GPR, GPR, i32imm);
@@ -394,9 +400,14 @@ def addrmode5 : Operand<i32>,
 // addrmode6 := reg with optional writeback
 //
 def addrmode6 : Operand<i32>,
-                ComplexPattern<i32, 4, "SelectAddrMode6", []> {
+                ComplexPattern<i32, 2, "SelectAddrMode6", []> {
   let PrintMethod = "printAddrMode6Operand";
-  let MIOperandInfo = (ops GPR:$addr, GPR:$upd, i32imm, i32imm);
+  let MIOperandInfo = (ops GPR:$addr, i32imm);
+}
+
+def am6offset : Operand<i32> {
+  let PrintMethod = "printAddrMode6OffsetOperand";
+  let MIOperandInfo = (ops GPR);
 }
 
 // addrmodepc := pc + reg
@@ -645,12 +656,12 @@ PseudoInst<(outs), (ins cpinst_operand:$instid, cpinst_operand:$cpidx,
 let Defs = [SP], Uses = [SP], hasSideEffects = 1 in {
 def ADJCALLSTACKUP :
 PseudoInst<(outs), (ins i32imm:$amt1, i32imm:$amt2, pred:$p), NoItinerary,
-           "@ ADJCALLSTACKUP $amt1",
+           "${:comment} ADJCALLSTACKUP $amt1",
            [(ARMcallseq_end timm:$amt1, timm:$amt2)]>;
 
 def ADJCALLSTACKDOWN :
 PseudoInst<(outs), (ins i32imm:$amt, pred:$p), NoItinerary,
-           "@ ADJCALLSTACKDOWN $amt",
+           "${:comment} ADJCALLSTACKDOWN $amt",
            [(ARMcallseq_start timm:$amt)]>;
 }
 
@@ -780,8 +791,11 @@ def DBG : AI<(outs), (ins i32imm:$opt), MiscFrm, NoItinerary, "dbg", "\t$opt",
 }
 
 // A5.4 Permanently UNDEFINED instructions.
-def TRAP : AI<(outs), (ins), MiscFrm, NoItinerary, "trap", "",
-              [/* For disassembly only; pattern left blank */]>,
+// FIXME: Temporary emitted as raw bytes until this pseudo-op will be added to
+// binutils
+let isBarrier = 1, isTerminator = 1 in
+def TRAP : AXI<(outs), (ins), MiscFrm, NoItinerary, 
+               ".long 0xe7ffdefe ${:comment} trap", [(trap)]>,
            Requires<[IsARM]> {
   let Inst{27-25} = 0b011;
   let Inst{24-20} = 0b11111;
@@ -911,7 +925,7 @@ let isReturn = 1, isTerminator = 1, isBarrier = 1, mayLoad = 1,
   def LDM_RET : AXI4ld<(outs GPR:$wb), (ins addrmode4:$addr, pred:$p,
                                         reglist:$dsts, variable_ops),
                        IndexModeUpd, LdStMulFrm, IIC_Br,
-                       "ldm${addr:submode}${p}\t$addr, $dsts",
+                       "ldm${addr:submode}${p}\t$addr!, $dsts",
                        "$addr.addr = $wb", []>;
 
 // On non-Darwin platforms R9 is callee-saved.
@@ -1223,7 +1237,7 @@ def LDRBT : AI2ldbpo<(outs GPR:$dst, GPR:$base_wb),
 }
 
 def LDRSBT : AI3ldsbpo<(outs GPR:$dst, GPR:$base_wb),
-                 (ins GPR:$base,am2offset:$offset), LdMiscFrm, IIC_iLoadru,
+                 (ins GPR:$base,am3offset:$offset), LdMiscFrm, IIC_iLoadru,
                  "ldrsbt", "\t$dst, [$base], $offset", "$base = $base_wb", []> {
   let Inst{21} = 1; // overwrite
 }
@@ -1356,7 +1370,7 @@ def LDM : AXI4ld<(outs), (ins addrmode4:$addr, pred:$p,
 def LDM_UPD : AXI4ld<(outs GPR:$wb), (ins addrmode4:$addr, pred:$p,
                                       reglist:$dsts, variable_ops),
                      IndexModeUpd, LdStMulFrm, IIC_iLoadm,
-                     "ldm${addr:submode}${p}\t$addr, $dsts",
+                     "ldm${addr:submode}${p}\t$addr!, $dsts",
                      "$addr.addr = $wb", []>;
 } // mayLoad, hasExtraDefRegAllocReq
 
@@ -1369,7 +1383,7 @@ def STM : AXI4st<(outs), (ins addrmode4:$addr, pred:$p,
 def STM_UPD : AXI4st<(outs GPR:$wb), (ins addrmode4:$addr, pred:$p,
                                       reglist:$srcs, variable_ops),
                      IndexModeUpd, LdStMulFrm, IIC_iStorem,
-                     "stm${addr:submode}${p}\t$addr, $srcs",
+                     "stm${addr:submode}${p}\t$addr!, $srcs",
                      "$addr.addr = $wb", []>;
 } // mayStore, hasExtraSrcRegAllocReq
 
@@ -2519,13 +2533,29 @@ let Defs =
   def Int_eh_sjlj_setjmp : XI<(outs), (ins GPR:$src, GPR:$val),
                                AddrModeNone, SizeSpecial, IndexModeNone,
                                Pseudo, NoItinerary,
-                               "str\tsp, [$src, #+8] @ eh_setjmp begin\n\t"
+                               "str\tsp, [$src, #+8] ${:comment} eh_setjmp begin\n\t"
                                "add\t$val, pc, #8\n\t"
                                "str\t$val, [$src, #+4]\n\t"
                                "mov\tr0, #0\n\t"
                                "add\tpc, pc, #0\n\t"
-                               "mov\tr0, #1 @ eh_setjmp end", "",
-                         [(set R0, (ARMeh_sjlj_setjmp GPR:$src, GPR:$val))]>;
+                               "mov\tr0, #1 ${:comment} eh_setjmp end", "",
+                         [(set R0, (ARMeh_sjlj_setjmp GPR:$src, GPR:$val))]>,
+                           Requires<[IsARM, HasVFP2]>;
+}
+
+let Defs =
+  [ R0,  R1,  R2,  R3,  R4,  R5,  R6,  R7,  R8,  R9,  R10, R11, R12, LR ] in {
+  def Int_eh_sjlj_setjmp_nofp : XI<(outs), (ins GPR:$src, GPR:$val),
+                                   AddrModeNone, SizeSpecial, IndexModeNone,
+                                   Pseudo, NoItinerary,
+                                   "str\tsp, [$src, #+8] ${:comment} eh_setjmp begin\n\t"
+                                   "add\t$val, pc, #8\n\t"
+                                   "str\t$val, [$src, #+4]\n\t"
+                                   "mov\tr0, #0\n\t"
+                                   "add\tpc, pc, #0\n\t"
+                                   "mov\tr0, #1 ${:comment} eh_setjmp end", "",
+                         [(set R0, (ARMeh_sjlj_setjmp GPR:$src, GPR:$val))]>,
+                                Requires<[IsARM, NoVFP]>;
 }
 
 //===----------------------------------------------------------------------===//
@@ -2739,7 +2769,7 @@ multiclass LdStCop<bits<4> op31_28, bit load, string opc> {
 
   def L_OFFSET : ACI<(outs),
       (ins nohash_imm:$cop, nohash_imm:$CRd, addrmode2:$addr),
-      opc, "l\tp$cop, cr$CRd, $addr"> {
+      !strconcat(opc, "l"), "\tp$cop, cr$CRd, $addr"> {
     let Inst{31-28} = op31_28;
     let Inst{24} = 1; // P = 1
     let Inst{21} = 0; // W = 0
@@ -2749,7 +2779,7 @@ multiclass LdStCop<bits<4> op31_28, bit load, string opc> {
 
   def L_PRE : ACI<(outs),
       (ins nohash_imm:$cop, nohash_imm:$CRd, addrmode2:$addr),
-      opc, "l\tp$cop, cr$CRd, $addr!"> {
+      !strconcat(opc, "l"), "\tp$cop, cr$CRd, $addr!"> {
     let Inst{31-28} = op31_28;
     let Inst{24} = 1; // P = 1
     let Inst{21} = 1; // W = 1
@@ -2759,7 +2789,7 @@ multiclass LdStCop<bits<4> op31_28, bit load, string opc> {
 
   def L_POST : ACI<(outs),
       (ins nohash_imm:$cop, nohash_imm:$CRd, GPR:$base, am2offset:$offset),
-      opc, "l\tp$cop, cr$CRd, [$base], $offset"> {
+      !strconcat(opc, "l"), "\tp$cop, cr$CRd, [$base], $offset"> {
     let Inst{31-28} = op31_28;
     let Inst{24} = 0; // P = 0
     let Inst{21} = 1; // W = 1
@@ -2769,7 +2799,7 @@ multiclass LdStCop<bits<4> op31_28, bit load, string opc> {
 
   def L_OPTION : ACI<(outs),
       (ins nohash_imm:$cop, nohash_imm:$CRd, GPR:$base, nohash_imm:$option),
-      opc, "l\tp$cop, cr$CRd, [$base], $option"> {
+      !strconcat(opc, "l"), "\tp$cop, cr$CRd, [$base], $option"> {
     let Inst{31-28} = op31_28;
     let Inst{24} = 0; // P = 0
     let Inst{23} = 1; // U = 1

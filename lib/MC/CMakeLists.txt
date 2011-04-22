@@ -10,13 +10,17 @@ add_llvm_library(LLVMMC
   MCExpr.cpp
   MCInst.cpp
   MCInstPrinter.cpp
+  MCLabel.cpp
   MCMachOStreamer.cpp
   MCNullStreamer.cpp
+  MCObjectWriter.cpp
   MCSection.cpp
+  MCSectionCOFF.cpp
   MCSectionELF.cpp
   MCSectionMachO.cpp
   MCStreamer.cpp
   MCSymbol.cpp
   MCValue.cpp
+  MachObjectWriter.cpp
   TargetAsmBackend.cpp
   )

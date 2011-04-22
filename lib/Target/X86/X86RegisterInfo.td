@@ -207,24 +207,15 @@ let Namespace = "X86" in {
   def DR7 : Register<"dr7">;
   
   // Condition registers
-  def ECR0 : Register<"ecr0">;
-  def ECR1 : Register<"ecr1">;
-  def ECR2 : Register<"ecr2">;
-  def ECR3 : Register<"ecr3">;
-  def ECR4 : Register<"ecr4">;
-  def ECR5 : Register<"ecr5">;
-  def ECR6 : Register<"ecr6">;
-  def ECR7 : Register<"ecr7">;
-
-  def RCR0 : Register<"rcr0">;
-  def RCR1 : Register<"rcr1">;
-  def RCR2 : Register<"rcr2">;
-  def RCR3 : Register<"rcr3">;
-  def RCR4 : Register<"rcr4">;
-  def RCR5 : Register<"rcr5">;
-  def RCR6 : Register<"rcr6">;
-  def RCR7 : Register<"rcr7">;
-  def RCR8 : Register<"rcr8">; 
+  def CR0 : Register<"cr0">;
+  def CR1 : Register<"cr1">;
+  def CR2 : Register<"cr2">;
+  def CR3 : Register<"cr3">;
+  def CR4 : Register<"cr4">;
+  def CR5 : Register<"cr5">;
+  def CR6 : Register<"cr6">;
+  def CR7 : Register<"cr7">;
+  def CR8 : Register<"cr8">;
 }
 
 
@@ -352,11 +343,12 @@ def GR8 : RegisterClass<"X86", [i8],  8,
       const TargetMachine &TM = MF.getTarget();
       const TargetRegisterInfo *RI = TM.getRegisterInfo();
       const X86Subtarget &Subtarget = TM.getSubtarget<X86Subtarget>();
+      const X86MachineFunctionInfo *MFI = MF.getInfo<X86MachineFunctionInfo>();
       // Does the function dedicate RBP / EBP to being a frame ptr?
       if (!Subtarget.is64Bit())
         // In 32-mode, none of the 8-bit registers aliases EBP or ESP.
         return begin() + 8;
-      else if (RI->hasFP(MF))
+      else if (RI->hasFP(MF) || MFI->getReserveFP())
         // If so, don't allocate SPL or BPL.
         return array_endof(X86_GR8_AO_64) - 1;
       else
@@ -396,9 +388,10 @@ def GR16 : RegisterClass<"X86", [i16], 16,
       const TargetMachine &TM = MF.getTarget();
       const TargetRegisterInfo *RI = TM.getRegisterInfo();
       const X86Subtarget &Subtarget = TM.getSubtarget<X86Subtarget>();
+      const X86MachineFunctionInfo *MFI = MF.getInfo<X86MachineFunctionInfo>();
       if (Subtarget.is64Bit()) {
         // Does the function dedicate RBP to being a frame ptr?
-        if (RI->hasFP(MF))
+        if (RI->hasFP(MF) || MFI->getReserveFP())
           // If so, don't allocate SP or BP.
           return array_endof(X86_GR16_AO_64) - 1;
         else
@@ -406,7 +399,7 @@ def GR16 : RegisterClass<"X86", [i16], 16,
           return array_endof(X86_GR16_AO_64);
       } else {
         // Does the function dedicate EBP to being a frame ptr?
-        if (RI->hasFP(MF))
+        if (RI->hasFP(MF) || MFI->getReserveFP())
           // If so, don't allocate SP or BP.
           return begin() + 6;
         else
@@ -447,9 +440,10 @@ def GR32 : RegisterClass<"X86", [i32], 32,
       const TargetMachine &TM = MF.getTarget();
       const TargetRegisterInfo *RI = TM.getRegisterInfo();
       const X86Subtarget &Subtarget = TM.getSubtarget<X86Subtarget>();
+      const X86MachineFunctionInfo *MFI = MF.getInfo<X86MachineFunctionInfo>();
       if (Subtarget.is64Bit()) {
         // Does the function dedicate RBP to being a frame ptr?
-        if (RI->hasFP(MF))
+        if (RI->hasFP(MF) || MFI->getReserveFP())
           // If so, don't allocate ESP or EBP.
           return array_endof(X86_GR32_AO_64) - 1;
         else
@@ -457,7 +451,7 @@ def GR32 : RegisterClass<"X86", [i32], 32,
           return array_endof(X86_GR32_AO_64);
       } else {
         // Does the function dedicate EBP to being a frame ptr?
-        if (RI->hasFP(MF))
+        if (RI->hasFP(MF) || MFI->getReserveFP())
           // If so, don't allocate ESP or EBP.
           return begin() + 6;
         else
@@ -484,9 +478,11 @@ def GR64 : RegisterClass<"X86", [i64], 64,
       const TargetMachine &TM = MF.getTarget();
       const TargetRegisterInfo *RI = TM.getRegisterInfo();
       const X86Subtarget &Subtarget = TM.getSubtarget<X86Subtarget>();
+      const X86MachineFunctionInfo *MFI = MF.getInfo<X86MachineFunctionInfo>();
       if (!Subtarget.is64Bit())
         return begin();  // None of these are allocatable in 32-bit.
-      if (RI->hasFP(MF)) // Does the function dedicate RBP to being a frame ptr?
+      // Does the function dedicate RBP to being a frame ptr?
+      if (RI->hasFP(MF) || MFI->getReserveFP())
         return end()-3;  // If so, don't allocate RIP, RSP or RBP
       else
         return end()-2;  // If not, just don't allocate RIP or RSP
@@ -506,14 +502,8 @@ def DEBUG_REG : RegisterClass<"X86", [i32], 32,
 }
 
 // Control registers.
-def CONTROL_REG_32 : RegisterClass<"X86", [i32], 32,
-                                   [ECR0, ECR1, ECR2, ECR3, ECR4, ECR5, ECR6,
-                                    ECR7]> {
-}
-
-def CONTROL_REG_64 : RegisterClass<"X86", [i64], 64,
-                                   [RCR0, RCR1, RCR2, RCR3, RCR4, RCR5, RCR6,
-                                    RCR7, RCR8]> {
+def CONTROL_REG : RegisterClass<"X86", [i64], 64,
+                                [CR0, CR1, CR2, CR3, CR4, CR5, CR6, CR7, CR8]> {
 }
 
 // GR8_ABCD_L, GR8_ABCD_H, GR16_ABCD, GR32_ABCD, GR64_ABCD - Subclasses of
@@ -589,8 +579,9 @@ def GR16_NOREX : RegisterClass<"X86", [i16], 16,
     GR16_NOREXClass::allocation_order_end(const MachineFunction &MF) const {
       const TargetMachine &TM = MF.getTarget();
       const TargetRegisterInfo *RI = TM.getRegisterInfo();
+      const X86MachineFunctionInfo *MFI = MF.getInfo<X86MachineFunctionInfo>();
       // Does the function dedicate RBP / EBP to being a frame ptr?
-      if (RI->hasFP(MF))
+      if (RI->hasFP(MF) || MFI->getReserveFP())
         // If so, don't allocate SP or BP.
         return end() - 2;
       else
@@ -611,8 +602,9 @@ def GR32_NOREX : RegisterClass<"X86", [i32], 32,
     GR32_NOREXClass::allocation_order_end(const MachineFunction &MF) const {
       const TargetMachine &TM = MF.getTarget();
       const TargetRegisterInfo *RI = TM.getRegisterInfo();
+      const X86MachineFunctionInfo *MFI = MF.getInfo<X86MachineFunctionInfo>();
       // Does the function dedicate RBP / EBP to being a frame ptr?
-      if (RI->hasFP(MF))
+      if (RI->hasFP(MF) || MFI->getReserveFP())
         // If so, don't allocate ESP or EBP.
         return end() - 2;
       else
@@ -633,8 +625,9 @@ def GR64_NOREX : RegisterClass<"X86", [i64], 64,
     GR64_NOREXClass::allocation_order_end(const MachineFunction &MF) const {
       const TargetMachine &TM = MF.getTarget();
       const TargetRegisterInfo *RI = TM.getRegisterInfo();
+      const X86MachineFunctionInfo *MFI = MF.getInfo<X86MachineFunctionInfo>();
       // Does the function dedicate RBP to being a frame ptr?
-      if (RI->hasFP(MF))
+      if (RI->hasFP(MF) || MFI->getReserveFP())
         // If so, don't allocate RIP, RSP or RBP.
         return end() - 3;
       else
@@ -675,9 +668,10 @@ def GR32_NOSP : RegisterClass<"X86", [i32], 32,
       const TargetMachine &TM = MF.getTarget();
       const TargetRegisterInfo *RI = TM.getRegisterInfo();
       const X86Subtarget &Subtarget = TM.getSubtarget<X86Subtarget>();
+      const X86MachineFunctionInfo *MFI = MF.getInfo<X86MachineFunctionInfo>();
       if (Subtarget.is64Bit()) {
         // Does the function dedicate RBP to being a frame ptr?
-        if (RI->hasFP(MF))
+        if (RI->hasFP(MF) || MFI->getReserveFP())
           // If so, don't allocate EBP.
           return array_endof(X86_GR32_NOSP_AO_64) - 1;
         else
@@ -685,7 +679,7 @@ def GR32_NOSP : RegisterClass<"X86", [i32], 32,
           return array_endof(X86_GR32_NOSP_AO_64);
       } else {
         // Does the function dedicate EBP to being a frame ptr?
-        if (RI->hasFP(MF))
+        if (RI->hasFP(MF) || MFI->getReserveFP())
           // If so, don't allocate EBP.
           return begin() + 6;
         else
@@ -710,9 +704,11 @@ def GR64_NOSP : RegisterClass<"X86", [i64], 64,
       const TargetMachine &TM = MF.getTarget();
       const TargetRegisterInfo *RI = TM.getRegisterInfo();
       const X86Subtarget &Subtarget = TM.getSubtarget<X86Subtarget>();
+      const X86MachineFunctionInfo *MFI = MF.getInfo<X86MachineFunctionInfo>();
       if (!Subtarget.is64Bit())
         return begin();  // None of these are allocatable in 32-bit.
-      if (RI->hasFP(MF)) // Does the function dedicate RBP to being a frame ptr?
+      // Does the function dedicate RBP to being a frame ptr?
+      if (RI->hasFP(MF) || MFI->getReserveFP())
         return end()-1;  // If so, don't allocate RBP
       else
         return end();  // If not, any reg in this class is ok.
@@ -733,8 +729,9 @@ def GR64_NOREX_NOSP : RegisterClass<"X86", [i64], 64,
   {
       const TargetMachine &TM = MF.getTarget();
       const TargetRegisterInfo *RI = TM.getRegisterInfo();
+      const X86MachineFunctionInfo *MFI = MF.getInfo<X86MachineFunctionInfo>();
       // Does the function dedicate RBP to being a frame ptr?
-      if (RI->hasFP(MF))
+      if (RI->hasFP(MF) || MFI->getReserveFP())
         // If so, don't allocate RBP.
         return end() - 1;
       else

@@ -646,18 +646,8 @@ Init *BinOpInit::Fold(Record *CurRec, MultiClass *CurMultiClass) {
     if (LHSs && RHSs) {
       DefInit *LOp = dynamic_cast<DefInit*>(LHSs->getOperator());
       DefInit *ROp = dynamic_cast<DefInit*>(RHSs->getOperator());
-      if (LOp->getDef() != ROp->getDef()) {
-        bool LIsOps =
-          LOp->getDef()->getName() == "outs" ||
-          LOp->getDef()->getName() != "ins" ||
-          LOp->getDef()->getName() != "defs";
-        bool RIsOps =
-          ROp->getDef()->getName() == "outs" ||
-          ROp->getDef()->getName() != "ins" ||
-          ROp->getDef()->getName() != "defs";
-        if (!LIsOps || !RIsOps)
-          throw "Concated Dag operators do not match!";
-      }
+      if (LOp == 0 || ROp == 0 || LOp->getDef() != ROp->getDef())
+        throw "Concated Dag operators do not match!";
       std::vector<Init*> Args;
       std::vector<std::string> ArgNames;
       for (unsigned i = 0, e = LHSs->getNumArgs(); i != e; ++i) {
@@ -1315,17 +1305,6 @@ void Record::resolveReferencesTo(const RecordVal *RV) {
     if (Init *V = Values[i].getValue())
       Values[i].setValue(V->resolveReferences(*this, RV));
   }
-}
-
-RecordVal *Record::getDottedValue(StringRef Name) {
-  size_t pos = Name.find('.');
-  if (pos == StringRef::npos)
-    return getValue(Name);
-  RecordVal *RV = getValue(Name.substr(0, pos));
-  if (!RV) return 0;
-  DefInit *DI = dynamic_cast<DefInit*>(RV->getValue());
-  if (!DI) return 0;
-  return DI->getDef()->getDottedValue(Name.substr(pos+1));
 }
 
 void Record::dump() const { errs() << *this; }

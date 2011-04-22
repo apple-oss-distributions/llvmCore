@@ -228,7 +228,7 @@ void TargetData::init(StringRef Desc) {
 /// @note This has to exist, because this is a pass, but it should never be
 /// used.
 TargetData::TargetData() : ImmutablePass(&ID) {
-  llvm_report_error("Bad TargetData ctor used.  "
+  report_fatal_error("Bad TargetData ctor used.  "
                     "Tool did not specify a TargetData to use?");
 }
 
@@ -269,18 +269,8 @@ unsigned TargetData::getAlignmentInfo(AlignTypeEnum AlignType,
       return ABIInfo ? Alignments[i].ABIAlign : Alignments[i].PrefAlign;
     
     // The best match so far depends on what we're looking for.
-    if (AlignType == VECTOR_ALIGN && Alignments[i].AlignType == VECTOR_ALIGN) {
-      // If this is a specification for a smaller vector type, we will fall back
-      // to it.  This happens because <128 x double> can be implemented in terms
-      // of 64 <2 x double>.
-      if (Alignments[i].TypeBitWidth < BitWidth) {
-        // Verify that we pick the biggest of the fallbacks.
-        if (BestMatchIdx == -1 ||
-            Alignments[BestMatchIdx].TypeBitWidth < Alignments[i].TypeBitWidth)
-          BestMatchIdx = i;
-      }
-    } else if (AlignType == INTEGER_ALIGN && 
-               Alignments[i].AlignType == INTEGER_ALIGN) {
+     if (AlignType == INTEGER_ALIGN && 
+         Alignments[i].AlignType == INTEGER_ALIGN) {
       // The "best match" for integers is the smallest size that is larger than
       // the BitWidth requested.
       if (Alignments[i].TypeBitWidth > BitWidth && (BestMatchIdx == -1 || 
@@ -303,10 +293,15 @@ unsigned TargetData::getAlignmentInfo(AlignTypeEnum AlignType,
     } else {
       assert(AlignType == VECTOR_ALIGN && "Unknown alignment type!");
 
-      // If we didn't find a vector size that is smaller or equal to this type,
-      // then we will end up scalarizing this to its element type.  Just return
-      // the alignment of the element.
-      return getAlignment(cast<VectorType>(Ty)->getElementType(), ABIInfo);
+      // By default, use natural alignment for vector types. This is consistent
+      // with what clang and llvm-gcc do.
+      unsigned Align = getTypeAllocSize(cast<VectorType>(Ty)->getElementType());
+      Align *= cast<VectorType>(Ty)->getNumElements();
+      // If the alignment is not a power of 2, round up to the next power of 2.
+      // This happens for non-power-of-2 length vectors.
+      if (Align & (Align-1))
+        Align = llvm::NextPowerOf2(Align);
+      return Align;
     }
   }
 
@@ -460,6 +455,15 @@ uint64_t TargetData::getTypeSizeInBits(const Type *Ty) const {
   case Type::StructTyID:
     // Get the layout annotation... which is lazily created on demand.
     return getStructLayout(cast<StructType>(Ty))->getSizeInBits();
+  case Type::UnionTyID: {
+    const UnionType *UnTy = cast<UnionType>(Ty);
+    uint64_t Size = 0;
+    for (UnionType::element_iterator i = UnTy->element_begin(),
+             e = UnTy->element_end(); i != e; ++i) {
+      Size = std::max(Size, getTypeSizeInBits(*i));
+    }
+    return Size;
+  }
   case Type::IntegerTyID:
     return cast<IntegerType>(Ty)->getBitWidth();
   case Type::VoidTyID:
@@ -515,6 +519,17 @@ unsigned char TargetData::getAlignment(const Type *Ty, bool abi_or_pref) const {
     const StructLayout *Layout = getStructLayout(cast<StructType>(Ty));
     unsigned Align = getAlignmentInfo(AGGREGATE_ALIGN, 0, abi_or_pref, Ty);
     return std::max(Align, (unsigned)Layout->getAlignment());
+  }
+  case Type::UnionTyID: {
+    const UnionType *UnTy = cast<UnionType>(Ty);
+    unsigned Align = 1;
+
+    // Unions need the maximum alignment of all their entries
+    for (UnionType::element_iterator i = UnTy->element_begin(), 
+             e = UnTy->element_end(); i != e; ++i) {
+      Align = std::max(Align, (unsigned)getAlignment(*i, abi_or_pref));
+    }
+    return Align;
   }
   case Type::IntegerTyID:
   case Type::VoidTyID:
@@ -600,13 +615,18 @@ uint64_t TargetData::getIndexedOffset(const Type *ptrTy, Value* const* Indices,
 
       // Update Ty to refer to current element
       Ty = STy->getElementType(FieldNo);
+    } else if (const UnionType *UnTy = dyn_cast<UnionType>(*TI)) {
+        unsigned FieldNo = cast<ConstantInt>(Indices[CurIDX])->getZExtValue();
+
+        // Offset into union is canonically 0, but type changes
+        Ty = UnTy->getElementType(FieldNo);
     } else {
       // Update Ty to refer to current element
       Ty = cast<SequentialType>(Ty)->getElementType();
 
       // Get the array index and the size of each array element.
-      int64_t arrayIdx = cast<ConstantInt>(Indices[CurIDX])->getSExtValue();
-      Result += arrayIdx * (int64_t)getTypeAllocSize(Ty);
+      if (int64_t arrayIdx = cast<ConstantInt>(Indices[CurIDX])->getSExtValue())
+        Result += arrayIdx * (int64_t)getTypeAllocSize(Ty);
     }
   }
 

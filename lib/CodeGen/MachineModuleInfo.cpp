@@ -12,8 +12,6 @@
 #include "llvm/Constants.h"
 #include "llvm/DerivedTypes.h"
 #include "llvm/GlobalVariable.h"
-#include "llvm/Intrinsics.h"
-#include "llvm/Instructions.h"
 #include "llvm/Module.h"
 #include "llvm/Analysis/ValueTracking.h"
 #include "llvm/CodeGen/MachineFunctionPass.h"
@@ -44,6 +42,10 @@ public:
   MMIAddrLabelMapCallbackPtr() : Map(0) {}
   MMIAddrLabelMapCallbackPtr(Value *V) : CallbackVH(V), Map(0) {}
   
+  void setPtr(BasicBlock *BB) {
+    ValueHandleBase::operator=(BB);
+  }
+    
   void setMap(MMIAddrLabelMap *map) { Map = map; }
   
   virtual void deleted();
@@ -209,7 +211,7 @@ void MMIAddrLabelMap::UpdateForRAUWBlock(BasicBlock *Old, BasicBlock *New) {
 
   // If New is not address taken, just move our symbol over to it.
   if (NewEntry.Symbols.isNull()) {
-    BBCallbacks[OldEntry.Index] = New;    // Update the callback.
+    BBCallbacks[OldEntry.Index].setPtr(New);    // Update the callback.
     NewEntry = OldEntry;     // Set New's entry.
     return;
   }
@@ -258,6 +260,7 @@ MachineModuleInfo::MachineModuleInfo(const MCAsmInfo &MAI)
   // Always emit some info, by default "no personality" info.
   Personalities.push_back(NULL);
   AddrLabelSymbols = 0;
+  TheModule = 0;
 }
 
 MachineModuleInfo::MachineModuleInfo()
@@ -310,18 +313,18 @@ void MachineModuleInfo::EndFunction() {
 
 /// AnalyzeModule - Scan the module for global debug information.
 ///
-void MachineModuleInfo::AnalyzeModule(Module &M) {
+void MachineModuleInfo::AnalyzeModule(const Module &M) {
   // Insert functions in the llvm.used array (but not llvm.compiler.used) into
   // UsedFunctions.
-  GlobalVariable *GV = M.getGlobalVariable("llvm.used");
+  const GlobalVariable *GV = M.getGlobalVariable("llvm.used");
   if (!GV || !GV->hasInitializer()) return;
 
   // Should be an array of 'i8*'.
-  ConstantArray *InitList = dyn_cast<ConstantArray>(GV->getInitializer());
+  const ConstantArray *InitList = dyn_cast<ConstantArray>(GV->getInitializer());
   if (InitList == 0) return;
 
   for (unsigned i = 0, e = InitList->getNumOperands(); i != e; ++i)
-    if (Function *F =
+    if (const Function *F =
           dyn_cast<Function>(InitList->getOperand(i)->stripPointerCasts()))
       UsedFunctions.insert(F);
 }
@@ -402,7 +405,7 @@ MCSymbol *MachineModuleInfo::addLandingPad(MachineBasicBlock *LandingPad) {
 /// addPersonality - Provide the personality function for the exception
 /// information.
 void MachineModuleInfo::addPersonality(MachineBasicBlock *LandingPad,
-                                       Function *Personality) {
+                                       const Function *Personality) {
   LandingPadInfo &LP = getOrCreateLandingPadInfo(LandingPad);
   LP.Personality = Personality;
 
@@ -421,7 +424,7 @@ void MachineModuleInfo::addPersonality(MachineBasicBlock *LandingPad,
 /// addCatchTypeInfo - Provide the catch typeinfo for a landing pad.
 ///
 void MachineModuleInfo::addCatchTypeInfo(MachineBasicBlock *LandingPad,
-                                        std::vector<GlobalVariable *> &TyInfo) {
+                                  std::vector<const GlobalVariable *> &TyInfo) {
   LandingPadInfo &LP = getOrCreateLandingPadInfo(LandingPad);
   for (unsigned N = TyInfo.size(); N; --N)
     LP.TypeIds.push_back(getTypeIDFor(TyInfo[N - 1]));
@@ -430,7 +433,7 @@ void MachineModuleInfo::addCatchTypeInfo(MachineBasicBlock *LandingPad,
 /// addFilterTypeInfo - Provide the filter typeinfo for a landing pad.
 ///
 void MachineModuleInfo::addFilterTypeInfo(MachineBasicBlock *LandingPad,
-                                        std::vector<GlobalVariable *> &TyInfo) {
+                                  std::vector<const GlobalVariable *> &TyInfo) {
   LandingPadInfo &LP = getOrCreateLandingPadInfo(LandingPad);
   std::vector<unsigned> IdsInFilter(TyInfo.size());
   for (unsigned I = 0, E = TyInfo.size(); I != E; ++I)
@@ -492,7 +495,7 @@ void MachineModuleInfo::TidyLandingPads(DenseMap<MCSymbol*, uintptr_t> *LPMap) {
 
 /// getTypeIDFor - Return the type id for the specified typeinfo.  This is
 /// function wide.
-unsigned MachineModuleInfo::getTypeIDFor(GlobalVariable *TI) {
+unsigned MachineModuleInfo::getTypeIDFor(const GlobalVariable *TI) {
   for (unsigned i = 0, N = TypeInfos.size(); i != N; ++i)
     if (TypeInfos[i] == TI) return i + 1;
 
@@ -532,7 +535,7 @@ try_next:;
 }
 
 /// getPersonality - Return the personality function for the current function.
-Function *MachineModuleInfo::getPersonality() const {
+const Function *MachineModuleInfo::getPersonality() const {
   // FIXME: Until PR1414 will be fixed, we're using 1 personality function per
   // function
   return !LandingPads.empty() ? LandingPads[0].Personality : NULL;

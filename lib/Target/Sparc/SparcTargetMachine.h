@@ -20,6 +20,7 @@
 #include "SparcInstrInfo.h"
 #include "SparcSubtarget.h"
 #include "SparcISelLowering.h"
+#include "SparcSelectionDAGInfo.h"
 
 namespace llvm {
 
@@ -27,6 +28,7 @@ class SparcTargetMachine : public LLVMTargetMachine {
   SparcSubtarget Subtarget;
   const TargetData DataLayout;       // Calculates type size & alignment
   SparcTargetLowering TLInfo;
+  SparcSelectionDAGInfo TSInfo;
   SparcInstrInfo InstrInfo;
   TargetFrameInfo FrameInfo;
 public:
@@ -39,8 +41,11 @@ public:
   virtual const SparcRegisterInfo *getRegisterInfo() const {
     return &InstrInfo.getRegisterInfo();
   }
-  virtual SparcTargetLowering* getTargetLowering() const {
-    return const_cast<SparcTargetLowering*>(&TLInfo);
+  virtual const SparcTargetLowering* getTargetLowering() const {
+    return &TLInfo;
+  }
+  virtual const SparcSelectionDAGInfo* getSelectionDAGInfo() const {
+    return &TSInfo;
   }
   virtual const TargetData       *getTargetData() const { return &DataLayout; }
 

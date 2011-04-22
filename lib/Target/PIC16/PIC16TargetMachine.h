@@ -17,6 +17,7 @@
 
 #include "PIC16InstrInfo.h"
 #include "PIC16ISelLowering.h"
+#include "PIC16SelectionDAGInfo.h"
 #include "PIC16RegisterInfo.h"
 #include "PIC16Subtarget.h"
 #include "llvm/Target/TargetData.h"
@@ -32,6 +33,7 @@ class PIC16TargetMachine : public LLVMTargetMachine {
   const TargetData      DataLayout;       // Calculates type size & alignment
   PIC16InstrInfo        InstrInfo;
   PIC16TargetLowering   TLInfo;
+  PIC16SelectionDAGInfo TSInfo;
 
   // PIC16 does not have any call stack frame, therefore not having 
   // any PIC16 specific FrameInfo class.
@@ -50,8 +52,12 @@ public:
     return &(InstrInfo.getRegisterInfo()); 
   }
 
-  virtual PIC16TargetLowering *getTargetLowering() const { 
-    return const_cast<PIC16TargetLowering*>(&TLInfo); 
+  virtual const PIC16TargetLowering *getTargetLowering() const { 
+    return &TLInfo;
+  }
+
+  virtual const PIC16SelectionDAGInfo* getSelectionDAGInfo() const {
+    return &TSInfo;
   }
 
   virtual bool addInstSelector(PassManagerBase &PM,

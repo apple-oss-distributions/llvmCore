@@ -558,4 +558,3 @@ Instruction *InstCombiner::visitShuffleVectorInst(ShuffleVectorInst &SVI) {
   
   return MadeChange ? &SVI : 0;
 }
-

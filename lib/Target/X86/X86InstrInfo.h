@@ -398,7 +398,10 @@ namespace X86II {
     FS          = 1 << SegOvrShift,
     GS          = 2 << SegOvrShift,
 
-    // Bits 22 -> 23 are unused
+    // Execution domain for SSE instructions in bits 22, 23.
+    // 0 in bits 22-23 means normal, non-SSE instruction.
+    SSEDomainShift = 22,
+
     OpcodeShift   = 24,
     OpcodeMask    = 0xFF << OpcodeShift
   };
@@ -486,7 +489,7 @@ class X86InstrInfo : public TargetInstrInfoImpl {
   /// MemOp2RegOpTable - Load / store unfolding opcode map.
   ///
   DenseMap<unsigned*, std::pair<unsigned, unsigned> > MemOp2RegOpTable;
-  
+
 public:
   explicit X86InstrInfo(X86TargetMachine &tm);
 
@@ -587,11 +590,13 @@ public:
                             MachineBasicBlock::iterator MI,
                             unsigned DestReg, unsigned SrcReg,
                             const TargetRegisterClass *DestRC,
-                            const TargetRegisterClass *SrcRC) const;
+                            const TargetRegisterClass *SrcRC,
+                            DebugLoc DL) const;
   virtual void storeRegToStackSlot(MachineBasicBlock &MBB,
                                    MachineBasicBlock::iterator MI,
                                    unsigned SrcReg, bool isKill, int FrameIndex,
-                                   const TargetRegisterClass *RC) const;
+                                   const TargetRegisterClass *RC,
+                                   const TargetRegisterInfo *TRI) const;
 
   virtual void storeRegToAddr(MachineFunction &MF, unsigned SrcReg, bool isKill,
                               SmallVectorImpl<MachineOperand> &Addr,
@@ -603,7 +608,8 @@ public:
   virtual void loadRegFromStackSlot(MachineBasicBlock &MBB,
                                     MachineBasicBlock::iterator MI,
                                     unsigned DestReg, int FrameIndex,
-                                    const TargetRegisterClass *RC) const;
+                                    const TargetRegisterClass *RC,
+                                    const TargetRegisterInfo *TRI) const;
 
   virtual void loadRegFromAddr(MachineFunction &MF, unsigned DestReg,
                                SmallVectorImpl<MachineOperand> &Addr,
@@ -620,6 +626,12 @@ public:
                                            MachineBasicBlock::iterator MI,
                                  const std::vector<CalleeSavedInfo> &CSI) const;
   
+  virtual
+  MachineInstr *emitFrameIndexDebugValue(MachineFunction &MF,
+                                         int FrameIx, uint64_t Offset,
+                                         const MDNode *MDPtr,
+                                         DebugLoc DL) const;
+
   /// foldMemoryOperand - If this target supports it, fold a load or store of
   /// the specified stack slot into the specified machine instruction for the
   /// specified operand(s).  If this is possible, the target should perform the
@@ -684,6 +696,8 @@ public:
                                        int64_t Offset1, int64_t Offset2,
                                        unsigned NumLoads) const;
 
+  virtual void getNoopForMachoTarget(MCInst &NopInst) const;
+
   virtual
   bool ReverseBranchCondition(SmallVectorImpl<MachineOperand> &Cond) const;
 
@@ -715,6 +729,13 @@ public:
   /// initialize the register in the function entry block, if necessary.
   ///
   unsigned getGlobalBaseReg(MachineFunction *MF) const;
+
+  /// GetSSEDomain - Return the SSE execution domain of MI as the first element,
+  /// and a bitmask of possible arguments to SetSSEDomain ase the second.
+  std::pair<uint16_t, uint16_t> GetSSEDomain(const MachineInstr *MI) const;
+
+  /// SetSSEDomain - Set the SSEDomain of MI.
+  void SetSSEDomain(MachineInstr *MI, unsigned Domain) const;
 
 private:
   MachineInstr * convertToThreeAddressWithLEA(unsigned MIOpc,

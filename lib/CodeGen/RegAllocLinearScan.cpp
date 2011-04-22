@@ -809,7 +809,7 @@ float getConflictWeight(LiveInterval *cur, unsigned Reg, LiveIntervals *li_,
     MachineInstr *MI = &*I;
     if (cur->liveAt(li_->getInstructionIndex(MI))) {
       unsigned loopDepth = loopInfo->getLoopDepth(MI->getParent());
-      Conflicts += powf(10.0f, (float)loopDepth);
+      Conflicts += std::pow(10.0f, (float)loopDepth);
     }
   }
   return Conflicts;
@@ -1177,7 +1177,7 @@ void RALinScan::assignRegOrStackSlotAtInterval(LiveInterval* cur) {
         assignRegOrStackSlotAtInterval(cur);
       } else {
         assert(false && "Ran out of registers during register allocation!");
-        llvm_report_error("Ran out of registers during register allocation!");
+        report_fatal_error("Ran out of registers during register allocation!");
       }
       return;
     }

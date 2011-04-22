@@ -227,13 +227,15 @@ void TypePrinting::CalcTypeName(const Type *Ty,
     const StructType *STy = cast<StructType>(Ty);
     if (STy->isPacked())
       OS << '<';
-    OS << "{ ";
+    OS << '{';
     for (StructType::element_iterator I = STy->element_begin(),
          E = STy->element_end(); I != E; ++I) {
-      CalcTypeName(*I, TypeStack, OS);
-      if (next(I) != STy->element_end())
-        OS << ',';
       OS << ' ';
+      CalcTypeName(*I, TypeStack, OS);
+      if (next(I) == STy->element_end())
+        OS << ' ';
+      else
+        OS << ',';
     }
     OS << '}';
     if (STy->isPacked())
@@ -242,13 +244,15 @@ void TypePrinting::CalcTypeName(const Type *Ty,
   }
   case Type::UnionTyID: {
     const UnionType *UTy = cast<UnionType>(Ty);
-    OS << "union { ";
+    OS << "union {";
     for (StructType::element_iterator I = UTy->element_begin(),
          E = UTy->element_end(); I != E; ++I) {
-      CalcTypeName(*I, TypeStack, OS);
-      if (next(I) != UTy->element_end())
-        OS << ',';
       OS << ' ';
+      CalcTypeName(*I, TypeStack, OS);
+      if (next(I) == UTy->element_end())
+        OS << ' ';
+      else
+        OS << ',';
     }
     OS << '}';
     break;
@@ -673,11 +677,16 @@ void SlotTracker::processFunction() {
       if (!I->getType()->isVoidTy() && !I->hasName())
         CreateFunctionSlot(I);
       
-      // Intrinsics can directly use metadata.
-      if (isa<IntrinsicInst>(I))
-        for (unsigned i = 0, e = I->getNumOperands(); i != e; ++i)
-          if (MDNode *N = dyn_cast_or_null<MDNode>(I->getOperand(i)))
-            CreateMetadataSlot(N);
+      // Intrinsics can directly use metadata.  We allow direct calls to any
+      // llvm.foo function here, because the target may not be linked into the
+      // optimizer.
+      if (const CallInst *CI = dyn_cast<CallInst>(I)) {
+        if (Function *F = CI->getCalledFunction())
+          if (F->getName().startswith("llvm."))
+            for (unsigned i = 0, e = I->getNumOperands(); i != e; ++i)
+              if (MDNode *N = dyn_cast_or_null<MDNode>(I->getOperand(i)))
+                CreateMetadataSlot(N);
+      }
 
       // Process metadata attached with this instruction.
       I->getAllMetadata(MDForInst);
@@ -1027,6 +1036,15 @@ static void WriteConstantInt(raw_ostream &Out, const Constant *CV,
     return;
   }
 
+  if (const ConstantUnion *CU = dyn_cast<ConstantUnion>(CV)) {
+    Out << "{ ";
+    TypePrinter.print(CU->getOperand(0)->getType(), Out);
+    Out << ' ';
+    WriteAsOperandInternal(Out, CU->getOperand(0), &TypePrinter, Machine);
+    Out << " }";
+    return;
+  }
+  
   if (const ConstantVector *CP = dyn_cast<ConstantVector>(CV)) {
     const Type *ETy = CP->getType()->getElementType();
     assert(CP->getNumOperands() > 0 &&
@@ -1555,6 +1573,7 @@ void AssemblyWriter::printFunction(const Function *F) {
   case CallingConv::Cold:         Out << "coldcc "; break;
   case CallingConv::X86_StdCall:  Out << "x86_stdcallcc "; break;
   case CallingConv::X86_FastCall: Out << "x86_fastcallcc "; break;
+  case CallingConv::X86_ThisCall: Out << "x86_thiscallcc "; break;
   case CallingConv::ARM_APCS:     Out << "arm_apcscc "; break;
   case CallingConv::ARM_AAPCS:    Out << "arm_aapcscc "; break;
   case CallingConv::ARM_AAPCS_VFP:Out << "arm_aapcs_vfpcc "; break;
@@ -1672,7 +1691,7 @@ void AssemblyWriter::printBasicBlock(const BasicBlock *BB) {
     // Output predecessors for the block...
     Out.PadToColumn(50);
     Out << ";";
-    pred_const_iterator PI = pred_begin(BB), PE = pred_end(BB);
+    const_pred_iterator PI = pred_begin(BB), PE = pred_end(BB);
 
     if (PI == PE) {
       Out << " No predecessors!";
@@ -1827,6 +1846,7 @@ void AssemblyWriter::printInstruction(const Instruction &I) {
     case CallingConv::Cold:  Out << " coldcc"; break;
     case CallingConv::X86_StdCall:  Out << " x86_stdcallcc"; break;
     case CallingConv::X86_FastCall: Out << " x86_fastcallcc"; break;
+    case CallingConv::X86_ThisCall: Out << " x86_thiscallcc"; break;
     case CallingConv::ARM_APCS:     Out << " arm_apcscc "; break;
     case CallingConv::ARM_AAPCS:    Out << " arm_aapcscc "; break;
     case CallingConv::ARM_AAPCS_VFP:Out << " arm_aapcs_vfpcc "; break;
@@ -1866,6 +1886,7 @@ void AssemblyWriter::printInstruction(const Instruction &I) {
     if (PAL.getFnAttributes() != Attribute::None)
       Out << ' ' << Attribute::getAsString(PAL.getFnAttributes());
   } else if (const InvokeInst *II = dyn_cast<InvokeInst>(&I)) {
+    Operand = II->getCalledValue();
     const PointerType    *PTy = cast<PointerType>(Operand->getType());
     const FunctionType   *FTy = cast<FunctionType>(PTy->getElementType());
     const Type         *RetTy = FTy->getReturnType();
@@ -1878,6 +1899,7 @@ void AssemblyWriter::printInstruction(const Instruction &I) {
     case CallingConv::Cold:  Out << " coldcc"; break;
     case CallingConv::X86_StdCall:  Out << " x86_stdcallcc"; break;
     case CallingConv::X86_FastCall: Out << " x86_fastcallcc"; break;
+    case CallingConv::X86_ThisCall: Out << " x86_thiscallcc"; break;
     case CallingConv::ARM_APCS:     Out << " arm_apcscc "; break;
     case CallingConv::ARM_AAPCS:    Out << " arm_aapcscc "; break;
     case CallingConv::ARM_AAPCS_VFP:Out << " arm_aapcs_vfpcc "; break;
@@ -1903,10 +1925,10 @@ void AssemblyWriter::printInstruction(const Instruction &I) {
       writeOperand(Operand, true);
     }
     Out << '(';
-    for (unsigned op = 3, Eop = I.getNumOperands(); op < Eop; ++op) {
-      if (op > 3)
+    for (unsigned op = 0, Eop = I.getNumOperands() - 3; op < Eop; ++op) {
+      if (op)
         Out << ", ";
-      writeParamOperand(I.getOperand(op), PAL.getParamAttributes(op-2));
+      writeParamOperand(I.getOperand(op), PAL.getParamAttributes(op + 1));
     }
 
     Out << ')';
@@ -2010,9 +2032,9 @@ static void WriteMDNodeComment(const MDNode *Node,
     return;
   ConstantInt *CI = dyn_cast_or_null<ConstantInt>(Node->getOperand(0));
   if (!CI) return;
-  unsigned Val = CI->getZExtValue();
-  unsigned Tag = Val & ~LLVMDebugVersionMask;
-  if (Val < LLVMDebugVersion)
+  APInt Val = CI->getValue();
+  APInt Tag = Val & ~APInt(Val.getBitWidth(), LLVMDebugVersionMask);
+  if (Val.ult(LLVMDebugVersion))
     return;
   
   Out.PadToColumn(50);
@@ -2026,8 +2048,10 @@ static void WriteMDNodeComment(const MDNode *Node,
     Out << "; [ DW_TAG_vector_type ]";
   else if (Tag == dwarf::DW_TAG_user_base)
     Out << "; [ DW_TAG_user_base ]";
-  else if (const char *TagName = dwarf::TagString(Tag))
-    Out << "; [ " << TagName << " ]";
+  else if (Tag.isIntN(32)) {
+    if (const char *TagName = dwarf::TagString(Tag.getZExtValue()))
+      Out << "; [ " << TagName << " ]";
+  }
 }
 
 void AssemblyWriter::writeAllMDNodes() {

@@ -23,6 +23,7 @@
 #include "llvm/CodeGen/MachineFrameInfo.h"
 #include "llvm/CodeGen/MachineInstr.h"
 #include "llvm/CodeGen/MachineJumpTableInfo.h"
+#include "llvm/CodeGen/MachineModuleInfo.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
 #include "llvm/CodeGen/Passes.h"
 #include "llvm/MC/MCAsmInfo.h"
@@ -39,40 +40,6 @@
 #include "llvm/Support/raw_ostream.h"
 using namespace llvm;
 
-namespace {
-  struct Printer : public MachineFunctionPass {
-    static char ID;
-
-    raw_ostream &OS;
-    const std::string Banner;
-
-    Printer(raw_ostream &os, const std::string &banner) 
-      : MachineFunctionPass(&ID), OS(os), Banner(banner) {}
-
-    const char *getPassName() const { return "MachineFunction Printer"; }
-
-    virtual void getAnalysisUsage(AnalysisUsage &AU) const {
-      AU.setPreservesAll();
-      MachineFunctionPass::getAnalysisUsage(AU);
-    }
-
-    bool runOnMachineFunction(MachineFunction &MF) {
-      OS << "# " << Banner << ":\n";
-      MF.print(OS);
-      return false;
-    }
-  };
-  char Printer::ID = 0;
-}
-
-/// Returns a newly-created MachineFunction Printer pass. The default banner is
-/// empty.
-///
-FunctionPass *llvm::createMachineFunctionPrinterPass(raw_ostream &OS,
-                                                     const std::string &Banner){
-  return new Printer(OS, Banner);
-}
-
 //===----------------------------------------------------------------------===//
 // MachineFunction implementation
 //===----------------------------------------------------------------------===//
@@ -84,22 +51,19 @@ void ilist_traits<MachineBasicBlock>::deleteNode(MachineBasicBlock *MBB) {
   MBB->getParent()->DeleteMachineBasicBlock(MBB);
 }
 
-MachineFunction::MachineFunction(Function *F, const TargetMachine &TM,
-                                 unsigned FunctionNum, MCContext &ctx)
-  : Fn(F), Target(TM), Ctx(ctx) {
+MachineFunction::MachineFunction(const Function *F, const TargetMachine &TM,
+                                 unsigned FunctionNum, MachineModuleInfo &mmi)
+  : Fn(F), Target(TM), Ctx(mmi.getContext()), MMI(mmi) {
   if (TM.getRegisterInfo())
-    RegInfo = new (Allocator.Allocate<MachineRegisterInfo>())
-                  MachineRegisterInfo(*TM.getRegisterInfo());
+    RegInfo = new (Allocator) MachineRegisterInfo(*TM.getRegisterInfo());
   else
     RegInfo = 0;
   MFInfo = 0;
-  FrameInfo = new (Allocator.Allocate<MachineFrameInfo>())
-                  MachineFrameInfo(*TM.getFrameInfo());
+  FrameInfo = new (Allocator) MachineFrameInfo(*TM.getFrameInfo());
   if (Fn->hasFnAttr(Attribute::StackAlignment))
     FrameInfo->setMaxAlignment(Attribute::getStackAlignmentFromAttrs(
         Fn->getAttributes().getFnAttributes()));
-  ConstantPool = new (Allocator.Allocate<MachineConstantPool>())
-                     MachineConstantPool(TM.getTargetData());
+  ConstantPool = new (Allocator) MachineConstantPool(TM.getTargetData());
   Alignment = TM.getTargetLowering()->getFunctionAlignment(F);
   FunctionNumber = FunctionNum;
   JumpTableInfo = 0;
@@ -132,7 +96,7 @@ MachineJumpTableInfo *MachineFunction::
 getOrCreateJumpTableInfo(unsigned EntryKind) {
   if (JumpTableInfo) return JumpTableInfo;
   
-  JumpTableInfo = new (Allocator.Allocate<MachineJumpTableInfo>())
+  JumpTableInfo = new (Allocator)
     MachineJumpTableInfo((MachineJumpTableInfo::JTEntryKind)EntryKind);
   return JumpTableInfo;
 }
@@ -229,14 +193,13 @@ MachineMemOperand *
 MachineFunction::getMachineMemOperand(const Value *v, unsigned f,
                                       int64_t o, uint64_t s,
                                       unsigned base_alignment) {
-  return new (Allocator.Allocate<MachineMemOperand>())
-             MachineMemOperand(v, f, o, s, base_alignment);
+  return new (Allocator) MachineMemOperand(v, f, o, s, base_alignment);
 }
 
 MachineMemOperand *
 MachineFunction::getMachineMemOperand(const MachineMemOperand *MMO,
                                       int64_t Offset, uint64_t Size) {
-  return new (Allocator.Allocate<MachineMemOperand>())
+  return new (Allocator)
              MachineMemOperand(MMO->getValue(), MMO->getFlags(),
                                int64_t(uint64_t(MMO->getOffset()) +
                                        uint64_t(Offset)),
@@ -440,15 +403,6 @@ unsigned MachineFunction::addLiveIn(unsigned PReg,
   return VReg;
 }
 
-/// getDILocation - Get the DILocation for a given DebugLoc object.
-DILocation MachineFunction::getDILocation(DebugLoc DL) const {
-  unsigned Idx = DL.getIndex();
-  assert(Idx < DebugLocInfo.DebugLocations.size() &&
-         "Invalid index into debug locations!");
-  return DILocation(DebugLocInfo.DebugLocations[Idx]);
-}
-
-
 /// getJTISymbol - Return the MCSymbol for the specified non-empty jump table.
 /// If isLinkerPrivate is specified, an 'l' label is returned, otherwise a
 /// normal 'L' label is returned.
@@ -464,9 +418,7 @@ MCSymbol *MachineFunction::getJTISymbol(unsigned JTI, MCContext &Ctx,
   SmallString<60> Name;
   raw_svector_ostream(Name)
     << Prefix << "JTI" << getFunctionNumber() << '_' << JTI;
-  if (isLinkerPrivate)
-    return Ctx.GetOrCreateSymbol(Name.str());
-  return Ctx.GetOrCreateTemporarySymbol(Name.str());
+  return Ctx.GetOrCreateSymbol(Name.str());
 }
 
 
@@ -678,7 +630,7 @@ MachineConstantPool::~MachineConstantPool() {
 
 /// CanShareConstantPoolEntry - Test whether the given two constants
 /// can be allocated the same constant pool entry.
-static bool CanShareConstantPoolEntry(Constant *A, Constant *B,
+static bool CanShareConstantPoolEntry(const Constant *A, const Constant *B,
                                       const TargetData *TD) {
   // Handle the trivial case quickly.
   if (A == B) return true;
@@ -693,17 +645,17 @@ static bool CanShareConstantPoolEntry(Constant *A, Constant *B,
 
   // If a floating-point value and an integer value have the same encoding,
   // they can share a constant-pool entry.
-  if (ConstantFP *AFP = dyn_cast<ConstantFP>(A))
-    if (ConstantInt *BI = dyn_cast<ConstantInt>(B))
+  if (const ConstantFP *AFP = dyn_cast<ConstantFP>(A))
+    if (const ConstantInt *BI = dyn_cast<ConstantInt>(B))
       return AFP->getValueAPF().bitcastToAPInt() == BI->getValue();
-  if (ConstantFP *BFP = dyn_cast<ConstantFP>(B))
-    if (ConstantInt *AI = dyn_cast<ConstantInt>(A))
+  if (const ConstantFP *BFP = dyn_cast<ConstantFP>(B))
+    if (const ConstantInt *AI = dyn_cast<ConstantInt>(A))
       return BFP->getValueAPF().bitcastToAPInt() == AI->getValue();
 
   // Two vectors can share an entry if each pair of corresponding
   // elements could.
-  if (ConstantVector *AV = dyn_cast<ConstantVector>(A))
-    if (ConstantVector *BV = dyn_cast<ConstantVector>(B)) {
+  if (const ConstantVector *AV = dyn_cast<ConstantVector>(A))
+    if (const ConstantVector *BV = dyn_cast<ConstantVector>(B)) {
       if (AV->getType()->getNumElements() != BV->getType()->getNumElements())
         return false;
       for (unsigned i = 0, e = AV->getType()->getNumElements(); i != e; ++i)
@@ -722,7 +674,7 @@ static bool CanShareConstantPoolEntry(Constant *A, Constant *B,
 /// an existing one.  User must specify the log2 of the minimum required
 /// alignment for the object.
 ///
-unsigned MachineConstantPool::getConstantPoolIndex(Constant *C, 
+unsigned MachineConstantPool::getConstantPoolIndex(const Constant *C, 
                                                    unsigned Alignment) {
   assert(Alignment && "Alignment must be specified!");
   if (Alignment > PoolAlignment) PoolAlignment = Alignment;

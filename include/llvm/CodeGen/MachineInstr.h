@@ -16,12 +16,13 @@
 #ifndef LLVM_CODEGEN_MACHINEINSTR_H
 #define LLVM_CODEGEN_MACHINEINSTR_H
 
-#include "llvm/ADT/ilist.h"
-#include "llvm/ADT/ilist_node.h"
-#include "llvm/ADT/STLExtras.h"
 #include "llvm/CodeGen/MachineOperand.h"
 #include "llvm/Target/TargetInstrDesc.h"
 #include "llvm/Target/TargetOpcodes.h"
+#include "llvm/ADT/ilist.h"
+#include "llvm/ADT/ilist_node.h"
+#include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/DenseMapInfo.h"
 #include "llvm/Support/DebugLoc.h"
 #include <vector>
 
@@ -90,15 +91,14 @@ private:
   // over time, the non-DebugLoc versions should be phased out and eventually
   // removed.
 
-  /// MachineInstr ctor - This constructor create a MachineInstr and add the
-  /// implicit operands.  It reserves space for number of operands specified by
-  /// TargetInstrDesc.  The version with a DebugLoc should be preferred.
+  /// MachineInstr ctor - This constructor creates a MachineInstr and adds the
+  /// implicit operands.  It reserves space for the number of operands specified
+  /// by the TargetInstrDesc.  The version with a DebugLoc should be preferred.
   explicit MachineInstr(const TargetInstrDesc &TID, bool NoImp = false);
 
   /// MachineInstr ctor - Work exactly the same as the ctor above, except that
   /// the MachineInstr is created and added to the end of the specified basic
   /// block.  The version with a DebugLoc should be preferred.
-  ///
   MachineInstr(MachineBasicBlock *MBB, const TargetInstrDesc &TID);
 
   /// MachineInstr ctor - This constructor create a MachineInstr and add the
@@ -110,7 +110,6 @@ private:
   /// MachineInstr ctor - Work exactly the same as the ctor above, except that
   /// the MachineInstr is created and added to the end of the specified basic
   /// block.
-  ///
   MachineInstr(MachineBasicBlock *MBB, const DebugLoc dl, 
                const TargetInstrDesc &TID);
 
@@ -127,6 +126,10 @@ public:
   ///
   unsigned short getAsmPrinterFlags() const { return AsmPrinterFlags; }
 
+  /// clearAsmPrinterFlags - clear the AsmPrinter bitvector
+  ///
+  void clearAsmPrinterFlags() { AsmPrinterFlags = 0; }
+  
   /// getAsmPrinterFlag - Return whether an AsmPrinter flag is set.
   ///
   bool getAsmPrinterFlag(CommentFlag Flag) const {
@@ -137,6 +140,12 @@ public:
   ///
   void setAsmPrinterFlag(CommentFlag Flag) {
     AsmPrinterFlags |= (unsigned short)Flag;
+  }
+  
+  /// clearAsmPrinterFlag - clear specific AsmPrinter flags
+  ///
+  void clearAsmPrinterFlag(CommentFlag Flag) {
+    AsmPrinterFlags &= ~Flag;
   }
 
   /// getDebugLoc - Returns the debug location id of this MachineInstr.
@@ -224,6 +233,9 @@ public:
   bool isSubregToReg() const {
     return getOpcode() == TargetOpcode::SUBREG_TO_REG;
   }
+  bool isRegSequence() const {
+    return getOpcode() == TargetOpcode::REG_SEQUENCE;
+  }
   
   /// readsRegister - Return true if the MachineInstr reads the specified
   /// register. If TargetRegisterInfo is passed, then it also checks if there
@@ -300,6 +312,10 @@ public:
   /// reference if DefOpIdx is not null.
   bool isRegTiedToDefOperand(unsigned UseOpIdx, unsigned *DefOpIdx = 0) const;
 
+  /// clearKillInfo - Clears kill flags on all operands.
+  ///
+  void clearKillInfo();
+
   /// copyKillDeadInfo - Copies kill / dead operand properties from MI.
   ///
   void copyKillDeadInfo(const MachineInstr *MI);
@@ -355,6 +371,10 @@ public:
   /// merges together the same virtual register, return the register, otherwise
   /// return 0.
   unsigned isConstantValuePHI() const;
+
+  /// allDefsAreDead - Return true if all the defs of this instruction are dead.
+  ///
+  bool allDefsAreDead() const;
 
   //
   // Debugging support

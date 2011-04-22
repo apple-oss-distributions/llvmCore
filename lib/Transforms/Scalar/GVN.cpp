@@ -868,7 +868,7 @@ static Value *CoerceAvailableValueToLoadType(Value *StoredVal,
   
   const Type *StoredValTy = StoredVal->getType();
   
-  uint64_t StoreSize = TD.getTypeSizeInBits(StoredValTy);
+  uint64_t StoreSize = TD.getTypeStoreSizeInBits(StoredValTy);
   uint64_t LoadSize = TD.getTypeSizeInBits(LoadedTy);
   
   // If the store and reload are the same size, we can always reuse it.
@@ -1004,18 +1004,18 @@ static int AnalyzeLoadFromClobberingWrite(const Type *LoadTy, Value *LoadPtr,
   
   // If the load and store are to the exact same address, they should have been
   // a must alias.  AA must have gotten confused.
-  // FIXME: Study to see if/when this happens.
-  if (LoadOffset == StoreOffset) {
+  // FIXME: Study to see if/when this happens.  One case is forwarding a memset
+  // to a load from the base of the memset.
 #if 0
+  if (LoadOffset == StoreOffset) {
     dbgs() << "STORE/LOAD DEP WITH COMMON POINTER MISSED:\n"
     << "Base       = " << *StoreBase << "\n"
     << "Store Ptr  = " << *WritePtr << "\n"
     << "Store Offs = " << StoreOffset << "\n"
     << "Load Ptr   = " << *LoadPtr << "\n";
     abort();
-#endif
-    return -1;
   }
+#endif
   
   // If the load and store don't overlap at all, the store doesn't provide
   // anything to the load.  In this case, they really don't alias at all, AA
@@ -1031,11 +1031,11 @@ static int AnalyzeLoadFromClobberingWrite(const Type *LoadTy, Value *LoadPtr,
   
   
   bool isAAFailure = false;
-  if (StoreOffset < LoadOffset) {
+  if (StoreOffset < LoadOffset)
     isAAFailure = StoreOffset+int64_t(StoreSize) <= LoadOffset;
-  } else {
+  else
     isAAFailure = LoadOffset+int64_t(LoadSize) <= StoreOffset;
-  }
+
   if (isAAFailure) {
 #if 0
     dbgs() << "STORE LOAD DEP WITH COMMON BASE:\n"
@@ -1132,8 +1132,8 @@ static Value *GetStoreValueForLoad(Value *SrcVal, unsigned Offset,
                                    Instruction *InsertPt, const TargetData &TD){
   LLVMContext &Ctx = SrcVal->getType()->getContext();
   
-  uint64_t StoreSize = TD.getTypeSizeInBits(SrcVal->getType())/8;
-  uint64_t LoadSize = TD.getTypeSizeInBits(LoadTy)/8;
+  uint64_t StoreSize = (TD.getTypeSizeInBits(SrcVal->getType()) + 7) / 8;
+  uint64_t LoadSize = (TD.getTypeSizeInBits(LoadTy) + 7) / 8;
   
   IRBuilder<> Builder(InsertPt->getParent(), InsertPt);
   
@@ -1217,7 +1217,7 @@ static Value *GetMemInstValueForLoad(MemIntrinsic *SrcInst, unsigned Offset,
   return ConstantFoldLoadFromConstPtr(Src, &TD);
 }
 
-
+namespace {
 
 struct AvailableValueInBlock {
   /// BB - The basic block in question.
@@ -1291,6 +1291,8 @@ struct AvailableValueInBlock {
   }
 };
 
+}
+
 /// ConstructSSAForLoadSet - Given a set of loads specified by ValuesPerBlock,
 /// construct SSA form, allowing us to eliminate LI.  This returns the value
 /// that should be used at LI's definition site.
@@ -1333,8 +1335,8 @@ static Value *ConstructSSAForLoadSet(LoadInst *LI,
   return V;
 }
 
-static bool isLifetimeStart(Instruction *Inst) {
-  if (IntrinsicInst* II = dyn_cast<IntrinsicInst>(Inst))
+static bool isLifetimeStart(const Instruction *Inst) {
+  if (const IntrinsicInst* II = dyn_cast<IntrinsicInst>(Inst))
     return II->getIntrinsicID() == Intrinsic::lifetime_start;
   return false;
 }
@@ -1582,7 +1584,7 @@ bool GVN::processNonLocalLoad(LoadInst *LI,
   for (unsigned i = 0, e = UnavailableBlocks.size(); i != e; ++i)
     FullyAvailableBlocks[UnavailableBlocks[i]] = false;
 
-  bool NeedToSplitEdges = false;
+  SmallVector<std::pair<TerminatorInst*, unsigned>, 4> NeedToSplit;
   for (pred_iterator PI = pred_begin(LoadBB), E = pred_end(LoadBB);
        PI != E; ++PI) {
     BasicBlock *Pred = *PI;
@@ -1598,12 +1600,13 @@ bool GVN::processNonLocalLoad(LoadInst *LI,
         return false;
       }
       unsigned SuccNum = GetSuccessorNumber(Pred, LoadBB);
-      toSplit.push_back(std::make_pair(Pred->getTerminator(), SuccNum));
-      NeedToSplitEdges = true;
+      NeedToSplit.push_back(std::make_pair(Pred->getTerminator(), SuccNum));
     }
   }
-  if (NeedToSplitEdges)
+  if (!NeedToSplit.empty()) {
+    toSplit.append(NeedToSplit.begin(), NeedToSplit.end());
     return false;
+  }
 
   // Decide whether PRE is profitable for this load.
   unsigned NumUnavailablePreds = PredLoads.size();

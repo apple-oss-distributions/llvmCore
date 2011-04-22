@@ -14,6 +14,7 @@
 #include "X86MCAsmInfo.h"
 #include "X86TargetMachine.h"
 #include "llvm/ADT/Triple.h"
+#include "llvm/MC/MCContext.h"
 #include "llvm/MC/MCSectionELF.h"
 #include "llvm/Support/CommandLine.h"
 using namespace llvm;
@@ -84,7 +85,6 @@ X86ELFMCAsmInfo::X86ELFMCAsmInfo(const Triple &T) {
   HasLEB128 = true;  // Target asm supports leb128 directives (little-endian)
 
   // Debug Information
-  AbsoluteDebugSectionOffsets = true;
   SupportsDebugInformation = true;
 
   // Exceptions handling
@@ -96,9 +96,10 @@ X86ELFMCAsmInfo::X86ELFMCAsmInfo(const Triple &T) {
     Data64bitsDirective = 0;
 }
 
-MCSection *X86ELFMCAsmInfo::getNonexecutableStackSection(MCContext &Ctx) const {
-  return MCSectionELF::Create(".note.GNU-stack", MCSectionELF::SHT_PROGBITS,
-                              0, SectionKind::getMetadata(), false, Ctx);
+const MCSection *X86ELFMCAsmInfo::
+getNonexecutableStackSection(MCContext &Ctx) const {
+  return Ctx.getELFSection(".note.GNU-stack", MCSectionELF::SHT_PROGBITS,
+                           0, SectionKind::getMetadata(), false);
 }
 
 X86MCAsmInfoCOFF::X86MCAsmInfoCOFF(const Triple &Triple) {

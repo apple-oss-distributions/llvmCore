@@ -72,8 +72,6 @@ public:
   virtual void setPoisonMemory(bool poison) { Base->setPoisonMemory(poison); }
   virtual void AllocateGOT() { Base->AllocateGOT(); }
   virtual uint8_t *getGOTBase() const { return Base->getGOTBase(); }
-  virtual void SetDlsymTable(void *ptr) { Base->SetDlsymTable(ptr); }
-  virtual void *getDlsymTable() const { return Base->getDlsymTable(); }
   struct StartFunctionBodyCall {
     StartFunctionBodyCall(uint8_t *Result, const Function *F,
                           uintptr_t ActualSize, uintptr_t ActualSizeResult)
@@ -313,7 +311,6 @@ TEST_F(JITTest, FarCallToKnownFunction) {
       ConstantInt::get(TypeBuilder<int, false>::get(Context), 7));
   Builder.CreateRet(result);
 
-  TheJIT->EnableDlsymStubs(false);
   TheJIT->DisableLazyCompilation(true);
   int (*TestFunctionPtr)() = reinterpret_cast<int(*)()>(
       (intptr_t)TheJIT->getPointerToFunction(TestFunction));
@@ -704,9 +701,7 @@ ExecutionEngine *getJITFromBitcode(
   LLVMContext &Context, const std::string &Bitcode, Module *&M) {
   // c_str() is null-terminated like MemoryBuffer::getMemBuffer requires.
   MemoryBuffer *BitcodeBuffer =
-    MemoryBuffer::getMemBuffer(Bitcode.c_str(),
-                               Bitcode.c_str() + Bitcode.size(),
-                               "Bitcode for test");
+    MemoryBuffer::getMemBuffer(Bitcode, "Bitcode for test");
   std::string errMsg;
   M = getLazyBitcodeModule(BitcodeBuffer, Context, &errMsg);
   if (M == NULL) {

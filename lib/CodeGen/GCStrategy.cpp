@@ -181,9 +181,10 @@ bool LowerIntrinsics::InsertRootInitializers(Function &F, AllocaInst **Roots,
   
   for (AllocaInst **I = Roots, **E = Roots + Count; I != E; ++I)
     if (!InitedRoots.count(*I)) {
-      new StoreInst(ConstantPointerNull::get(cast<PointerType>(
-                      cast<PointerType>((*I)->getType())->getElementType())),
-                    *I, IP);
+      StoreInst* SI = new StoreInst(ConstantPointerNull::get(cast<PointerType>(
+                        cast<PointerType>((*I)->getType())->getElementType())),
+                        *I);
+      SI->insertAfter(*I);
       MadeChange = true;
     }
   
@@ -332,7 +333,7 @@ void MachineCodeAnalysis::getAnalysisUsage(AnalysisUsage &AU) const {
 MCSymbol *MachineCodeAnalysis::InsertLabel(MachineBasicBlock &MBB, 
                                            MachineBasicBlock::iterator MI,
                                            DebugLoc DL) const {
-  MCSymbol *Label = MBB.getParent()->getContext().GetOrCreateTemporarySymbol();
+  MCSymbol *Label = MBB.getParent()->getContext().CreateTempSymbol();
   BuildMI(MBB, MI, DL, TII->get(TargetOpcode::GC_LABEL)).addSym(Label);
   return Label;
 }

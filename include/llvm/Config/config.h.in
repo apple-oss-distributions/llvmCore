@@ -24,6 +24,9 @@
 /* Define if threads enabled */
 #undef ENABLE_THREADS
 
+/* Define if timestamp information (e.g., __DATE___) is allowed */
+#undef ENABLE_TIMESTAMPS
+
 /* Define to 1 if you have the `argz_append' function. */
 #undef HAVE_ARGZ_APPEND
 
@@ -263,6 +266,9 @@
 
 /* Define to 1 if you have the `opendir' function. */
 #undef HAVE_OPENDIR
+
+/* Define to 1 if you have the `posix_spawn' function. */
+#undef HAVE_POSIX_SPAWN
 
 /* Define to 1 if you have the `powf' function. */
 #undef HAVE_POWF

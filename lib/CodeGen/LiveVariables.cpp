@@ -531,7 +531,7 @@ bool LiveVariables::runOnMachineFunction(MachineFunction &mf) {
 
     // Mark live-in registers as live-in.
     SmallVector<unsigned, 4> Defs;
-    for (MachineBasicBlock::const_livein_iterator II = MBB->livein_begin(),
+    for (MachineBasicBlock::livein_iterator II = MBB->livein_begin(),
            EE = MBB->livein_end(); II != EE; ++II) {
       assert(TargetRegisterInfo::isPhysicalRegister(*II) &&
              "Cannot have a live-in virtual register!");
@@ -556,17 +556,21 @@ bool LiveVariables::runOnMachineFunction(MachineFunction &mf) {
       if (MI->isPHI())
         NumOperandsToProcess = 1;
 
+      // Clear kill and dead markers. LV will recompute them.
       SmallVector<unsigned, 4> UseRegs;
       SmallVector<unsigned, 4> DefRegs;
       for (unsigned i = 0; i != NumOperandsToProcess; ++i) {
-        const MachineOperand &MO = MI->getOperand(i);
+        MachineOperand &MO = MI->getOperand(i);
         if (!MO.isReg() || MO.getReg() == 0)
           continue;
         unsigned MOReg = MO.getReg();
-        if (MO.isUse())
+        if (MO.isUse()) {
+          MO.setIsKill(false);
           UseRegs.push_back(MOReg);
-        if (MO.isDef())
+        } else /*MO.isDef()*/ {
+          MO.setIsDead(false);
           DefRegs.push_back(MOReg);
+        }
       }
 
       // Process all uses.

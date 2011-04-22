@@ -28,6 +28,7 @@ class TargetInstrInfo;
 class TargetIntrinsicInfo;
 class TargetJITInfo;
 class TargetLowering;
+class TargetSelectionDAGInfo;
 class TargetFrameInfo;
 class JITCodeEmitter;
 class MCContext;
@@ -105,7 +106,8 @@ public:
   //
   virtual const TargetInstrInfo        *getInstrInfo() const { return 0; }
   virtual const TargetFrameInfo        *getFrameInfo() const { return 0; }
-  virtual       TargetLowering    *getTargetLowering() const { return 0; }
+  virtual const TargetLowering    *getTargetLowering() const { return 0; }
+  virtual const TargetSelectionDAGInfo *getSelectionDAGInfo() const{ return 0; }
   virtual const TargetData            *getTargetData() const { return 0; }
   
   /// getMCAsmInfo - Return target specific asm information.
@@ -171,6 +173,21 @@ public:
   /// is false.
   static void setAsmVerbosityDefault(bool);
 
+  /// getDataSections - Return true if data objects should be emitted into their
+  /// own section, corresponds to -fdata-sections.
+  static bool getDataSections();
+
+  /// getFunctionSections - Return true if functions should be emitted into
+  /// their own section, corresponding to -ffunction-sections.
+  static bool getFunctionSections();
+
+  /// setDataSections - Set if the data are emit into separate sections.
+  static void setDataSections(bool);
+
+  /// setFunctionSections - Set if the functions are emit into separate
+  /// sections.
+  static void setFunctionSections(bool);
+
   /// CodeGenFileType - These enums are meant to be passed into
   /// addPassesToEmitFile to indicate what type of file to emit, and returned by
   /// it to indicate what type of file could actually be made.
@@ -206,17 +223,6 @@ public:
                                           JITCodeEmitter &,
                                           CodeGenOpt::Level,
                                           bool = true) {
-    return true;
-  }
-
-  /// addPassesToEmitWholeFile - This method can be implemented by targets that 
-  /// require having the entire module at once.  This is not recommended, do not
-  /// use this.
-  virtual bool WantsWholeFile() const { return false; }
-  virtual bool addPassesToEmitWholeFile(PassManager &, formatted_raw_ostream &,
-                                        CodeGenFileType,
-                                        CodeGenOpt::Level,
-                                        bool = true) {
     return true;
   }
 };
